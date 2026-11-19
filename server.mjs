@@ -1737,24 +1737,28 @@ export function createApp(cfg = loadConfig()) {
   // The list of files in "My files" (what the agent compares its copy with) and one file from it.
   add('GET', '/api/agent/mirror', 'agent', c => {
     const home = homeOf(c.user);
-    const files = [];
+    const files = [], dirs = [];
     if (home) {
-      for (const { id } of db.all(`${SUBTREE} SELECT n.id FROM nodes n JOIN t ON n.id = t.id WHERE n.is_dir = 0 AND n.deleted_at IS NULL`, home.id)) {
+      for (const { id } of db.all(`${SUBTREE} SELECT n.id FROM nodes n JOIN t ON n.id = t.id WHERE n.deleted_at IS NULL AND n.id != ?`, home.id, home.id)) {
         const x = acl.resolve(c.ctx, id);
         if (!x?.level) continue;
-        const at = x.chain.findIndex(n => n.id === home.id);
-        files.push({ id, path: x.chain.slice(at + 1).map(n => n.name).join('/'), size: x.node.size, v: contentVersion(x.node), modified: x.node.updated_at });
+        const path = relOf(x, home);
+        if (x.node.is_dir) dirs.push({ id, path, created: x.node.created_at });
+        else files.push({ id, path, size: x.node.size, v: contentVersion(x.node), modified: x.node.updated_at });
       }
     }
-    return { since: c.device.created_at, files };
+    return { since: c.device.created_at, files, dirs };
   });
 
-  function inHome(c, home, id) {
+  // A file (or, with dir, a folder) inside My files, never My files itself.
+  function inHome(c, home, id, dir = false) {
     const x = home && acl.resolve(c.ctx, int(id));
-    if (!x?.level || x.node.is_dir || !x.chain.some(n => n.id === home.id)) fail(404, 'This file is no longer in My files.');
+    if (!x?.level || !!x.node.is_dir !== dir || x.node.id === home.id || !x.chain.some(n => n.id === home.id)) fail(404, `This ${dir ? 'folder' : 'file'} is no longer in My files.`);
     return x;
   }
-  const relOf = (x, home) => x.chain.slice(x.chain.findIndex(n => n.id === home.id) + 1).map(n => n.name).join('/');
+  function relOf(x, home) {
+    return x.chain.slice(x.chain.findIndex(n => n.id === home.id) + 1).map(n => n.name).join('/');
+  }
 
   add('GET', '/api/agent/mirror/:id', 'agent', c => {
     const x = inHome(c, homeOf(c.user), c.params.id);
@@ -1781,28 +1785,13 @@ export function createApp(cfg = loadConfig()) {
     const size = Number(c.req.headers['content-length']);
     if (!Number.isSafeInteger(size) || size < 0) fail(411, 'The file size is missing.');
     if (size > cfg.maxFile) fail(413, `Files larger than ${fmtBytes(cfg.maxFile)} cannot be uploaded.`);
-    let folderId = home.id, name;
+    let folderId, name;
     if (c.query.get('id')) {
       const x = inHome(c, home, c.query.get('id'));
       if (contentVersion(x.node) !== c.query.get('base')) fail(409, 'It was changed on the website meanwhile.', 'changed');
       folderId = x.node.parent_id;
       name = x.node.name;
-    } else {
-      const segs = String(c.query.get('path') || '').split('/').filter(Boolean);
-      if (!segs.length || segs.length > 40) fail(400, 'Invalid path.');
-      name = fitName(segs.pop());
-      const dirs = segs.map(fitName);
-      if ([...acl.resolve(c.ctx, home.id).chain.map(n => n.name), ...dirs, name].join('/').length > PATH_MAX) fail(400, `The full path would be longer than ${PATH_MAX} characters.`);
-      db.tx(() => {
-        for (const seg of dirs) {
-          const ex = taken(folderId, seg);
-          if (ex && !ex.is_dir) fail(409, `"${seg}" is a file on the website, not a folder.`);
-          if (ex && (acl.resolve(c.ctx, ex.id)?.level || 0) < EDIT) fail(403, `You cannot add files to "${seg}".`);
-          const now = Date.now();
-          folderId = ex ? ex.id : db.run('INSERT INTO nodes(parent_id, name, is_dir, created_at, updated_at, updated_by) VALUES(?, ?, 1, ?, ?, ?)', folderId, seg, now, now, c.user.id).lastInsertRowid;
-        }
-      });
-    }
+    } else ({ folderId, name } = homePath(c, home, c.query.get('path')));
     const r = acl.resolve(c.ctx, folderId);
     if ((r?.level || 0) < EDIT) fail(403, 'You cannot add files here.');
     checkPathLength(r.chain, name);
@@ -1810,6 +1799,68 @@ export function createApp(cfg = loadConfig()) {
     const made = placeFile(c, r, name, blob, size);
     const x = acl.resolve(c.ctx, made.id);
     return { id: made.id, path: relOf(x, home), v: contentVersion(x.node), modified: x.node.updated_at };
+  });
+
+  // "A/B/name" below My files: creates the folders that are missing (names fitted) and returns the last folder's id
+  // and the fitted name. With dir, all of it is folders.
+  function homePath(c, home, raw, dir = false) {
+    const segs = String(raw || '').split('/').filter(Boolean);
+    if (!segs.length || segs.length > 40) fail(400, 'Invalid path.');
+    const name = dir ? null : fitName(segs.pop());
+    const dirs = segs.map(fitName);
+    if ([...acl.resolve(c.ctx, home.id).chain.map(n => n.name), ...dirs, name || ''].join('/').length > PATH_MAX) fail(400, `The full path would be longer than ${PATH_MAX} characters.`);
+    let folderId = home.id;
+    db.tx(() => {
+      for (const seg of dirs) {
+        const ex = taken(folderId, seg);
+        if (ex && !ex.is_dir) fail(409, `"${seg}" is a file on the website, not a folder.`);
+        if (ex && (acl.resolve(c.ctx, ex.id)?.level || 0) < EDIT) fail(403, `You cannot add files to "${seg}".`);
+        const now = Date.now();
+        folderId = ex ? ex.id : db.run('INSERT INTO nodes(parent_id, name, is_dir, created_at, updated_at, updated_by) VALUES(?, ?, 1, ?, ?, ?)', folderId, seg, now, now, c.user.id).lastInsertRowid;
+      }
+    });
+    return { folderId, name };
+  }
+
+  // A folder made on the computer (empty ones too).
+  add('POST', '/api/agent/mirror/dir', 'agent', c => {
+    const home = homeOf(c.user);
+    if (!home) fail(404, 'This account has no My files folder.');
+    const { folderId } = homePath(c, home, c.query.get('path'), true);
+    return { id: folderId, path: relOf(acl.resolve(c.ctx, folderId), home) };
+  });
+
+  // A file or folder renamed or moved on the computer: the same item is renamed or moved here (its versions and
+  // access settings stay). For a file, base= is the version the computer had.
+  add('POST', '/api/agent/mirror/move', 'agent', c => {
+    const home = homeOf(c.user);
+    const dir = c.query.get('dir') === '1';
+    const r = inHome(c, home, c.query.get('id'), dir);
+    if (!dir && contentVersion(r.node) !== c.query.get('base')) fail(409, 'It was changed on the website meanwhile.', 'changed');
+    if (r.parentLevel < EDIT) fail(403, 'You cannot move this.');
+    const segs = String(c.query.get('path') || '').split('/').filter(Boolean);
+    if (!segs.length || segs.length > 40) fail(400, 'Invalid path.');
+    const name = fitName(segs.pop());
+    const { folderId } = segs.length ? homePath(c, home, segs.join('/'), true) : { folderId: home.id };
+    const d = acl.resolve(c.ctx, folderId);
+    if ((d?.level || 0) < EDIT) fail(403, 'You cannot move things there.');
+    if (d.chain.some(n => n.id === r.node.id)) fail(400, 'A folder cannot be moved into itself.');
+    guardHidden(c, r);
+    if (folderId !== r.node.parent_id || name !== r.node.name) {
+      checkPathLength(d.chain, name, dir ? r.node.id : null);
+      unique(() => db.run('UPDATE nodes SET name = ?, parent_id = ?, updated_at = ?, updated_by = ? WHERE id = ?', name, folderId, Date.now(), c.user.id, r.node.id));
+      audit(c, 'file', `${folderId !== r.node.parent_id ? 'moved' : 'renamed'} (on computer "${c.device.name}")`, `${pathOf(r.chain)} → ${pathOf(d.chain)} / ${name}`, r.node.id);
+    }
+    return { id: r.node.id, path: relOf(acl.resolve(c.ctx, r.node.id), home) };
+  });
+
+  // A folder deleted on the computer goes to the trash here, once it holds nothing more (its files go one by one).
+  add('DELETE', '/api/agent/mirror/dir/:id', 'agent', c => {
+    const x = inHome(c, homeOf(c.user), c.params.id, true);
+    if (db.get('SELECT 1 FROM nodes WHERE parent_id = ? AND deleted_at IS NULL', x.node.id)) fail(409, 'This folder still has something in it on the website.', 'not-empty');
+    if (x.parentLevel < EDIT) fail(403, 'You cannot delete this folder.');
+    db.run('UPDATE nodes SET deleted_at = ?, deleted_by = ? WHERE id = ?', Date.now(), c.user.id, x.node.id);
+    audit(c, 'file', `moved to trash (deleted on computer "${c.device.name}")`, pathOf(x.chain), x.node.id);
   });
 
   add('DELETE', '/api/agent/mirror/:id', 'agent', c => {

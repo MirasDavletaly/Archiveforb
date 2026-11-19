@@ -131,11 +131,49 @@ try {
     return read('Budget.txt') === 'website edit' && local && read(local) === 'laptop edit' && remote && (await content(remote.id)) === 'laptop edit' && (await content(both)) === 'website edit';
   }, 40000));
 
-  // ---- the whole folder disappears (a drive unplugged, deleted by hand): the website keeps everything ----
+  // ---- folders, website → computer: empty and nested ones, renamed and moved with what is inside, deleted ----
+  const isDirHere = rel => fs.existsSync(path.join(MY, rel)) && fs.statSync(path.join(MY, rel)).isDirectory();
+  const mkSite = async (parent, name) => (await U.req('POST', `/api/nodes/${parent}/folders`, { json: { name } })).id;
+  const emptySite = await mkSite(home, 'Empty from site');
+  expect('an empty folder made on the website appears here', await until(() => isDirHere('Empty from site')));
+  const clients = await mkSite(home, 'Clients');
+  const acme = await mkSite(clients, 'Acme');
+  await upload(acme, 'deal.txt', 'signed');
+  expect('nested folders and a file in them appear here', await until(() => read('Clients/Acme/deal.txt') === 'signed'));
+  const dealTime = fs.statSync(path.join(MY, 'Clients/Acme/deal.txt')).mtimeMs;
+  await U.req('PATCH', `/api/nodes/${clients}`, { json: { name: 'Customers' } });
+  expect('a folder renamed on the website is renamed here, with its contents (not downloaded again)', await until(() => read('Customers/Acme/deal.txt') === 'signed' && !isDirHere('Clients') && fs.statSync(path.join(MY, 'Customers/Acme/deal.txt')).mtimeMs === dealTime));
+  await U.req('PATCH', `/api/nodes/${acme}`, { json: { parent_id: emptySite } });
+  expect('a folder moved on the website is moved here', await until(() => read('Empty from site/Acme/deal.txt') === 'signed' && !isDirHere('Customers/Acme') && isDirHere('Customers')));
+  await U.req('DELETE', `/api/nodes/${emptySite}`);
+  expect('a folder deleted on the website is removed here (its files to the trash)', await until(() => !isDirHere('Empty from site')));
+
+  // ---- folders, computer → website ----
+  const sitePath = async rel => { let id = home; for (const part of rel.split('/')) { const n = await child(id, part); if (!n) return null; id = n.id; } return id; };
+  fs.mkdirSync(path.join(MY, 'Laptop empty'));
+  expect('an empty folder made here appears on the website', await until(async () => !!(await sitePath('Laptop empty'))));
+  fs.mkdirSync(path.join(MY, 'Deep', 'A', 'B'), { recursive: true });
+  fs.writeFileSync(path.join(MY, 'Deep', 'A', 'note.txt'), 'deep note');
+  let deepId, noteId;
+  expect('nested empty folders and a file in them appear on the website', await until(async () => {
+    deepId = await sitePath('Deep'); noteId = await sitePath('Deep/A/note.txt');
+    return deepId && (await sitePath('Deep/A/B')) && noteId && (await content(noteId)) === 'deep note';
+  }));
+  fs.renameSync(path.join(MY, 'Deep'), path.join(MY, 'Deeper'));
+  expect('a folder renamed here: the same folder is renamed on the website (and its file is the same file)', await until(async () => (await sitePath('Deeper')) === deepId && (await sitePath('Deeper/A/note.txt')) === noteId && !(await sitePath('Deep'))));
+  fs.renameSync(path.join(MY, 'Deeper', 'A', 'note.txt'), path.join(MY, 'Laptop empty', 'note moved.txt'));
+  expect('a file moved and renamed here: the same file is moved on the website (versions kept)', await until(async () => (await sitePath('Laptop empty/note moved.txt')) === noteId && !(await sitePath('Deeper/A/note.txt'))));
+  fs.renameSync(path.join(MY, 'Laptop empty'), path.join(MY, 'Laptop full'));
+  expect('a folder with a file renamed here: renamed on the website', await until(async () => !!(await sitePath('Laptop full/note moved.txt')) && !(await sitePath('Laptop empty'))));
+  fs.rmSync(path.join(MY, 'Deeper'), { recursive: true });
+  expect('a folder deleted here (with empty folders in it): in the website trash', await until(async () => !(await sitePath('Deeper')) && (await U.req('GET', '/api/trash')).some(t => t.id === deepId)));
+
+  // ---- the whole folder disappears (deleted or moved by hand): nothing goes on the website, it comes back ----
   const countBefore = (await kids(home)).length;
   fs.renameSync(MY, MY + ' moved away');
   await sleep(12000);
   expect(`a vanished My files folder deletes nothing on the website (${(await kids(home)).length} of ${countBefore} items)`, (await kids(home)).length === countBefore && !(await U.req('GET', '/api/trash')).some(t => t.name === 'Budget.txt'));
+  expect('and it comes back from the website', await until(() => read('Budget.txt') === 'website edit' && read('Laptop full/note moved.txt') === 'deep note' && isDirHere('Customers'), 20000));
   const log = fs.readFileSync(path.join(CFG, 'agent.log'), 'utf8');
   expect('the token never appears in the log', !log.includes(JSON.parse(fs.readFileSync(path.join(CFG, 'agent.json'), 'utf8')).token || 'none'));
 } catch (e) {

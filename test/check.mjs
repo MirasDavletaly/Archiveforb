@@ -726,7 +726,27 @@ try {
   assert.equal((await asAgent('DELETE', `/api/agent/mirror/${mfile}?base=${med.data.v}`)).status, 200);
   assert.ok(ok(await PO.get('/api/trash')).some(t => t.id === mfile), 'deleted on the computer: in the website trash');
   assert.ok(app.db.get(`SELECT 1 FROM audit WHERE action = 'moved to trash (deleted on computer "Pavel laptop")' AND node_id = ?`, mfile));
-  pass('My files in sync both ways: changes push a notice, the agent lists and fetches its own folder only, its new files, edits and deletions come back with version checks');
+  // folders: listed (empty ones too), made, renamed and moved as the same item, deleted only when empty
+  const md = JSON.parse((await asAgent('POST', '/api/agent/mirror/dir?path=' + encodeURIComponent('Plans/2026/Empty one'))).text);
+  assert.equal(md.path, 'Plans/2026/Empty one', 'a folder made on the computer, with its parents');
+  const ml2 = ok(await agent('GET', '/api/agent/mirror', devTok));
+  assert.ok(['Plans', 'Plans/2026', 'Plans/2026/Empty one', 'From laptop'].every(p => ml2.dirs.some(d => d.path === p)), 'the list has the folders, empty ones too');
+  const plansDir = ml2.dirs.find(d => d.path === 'Plans').id;
+  const mv = JSON.parse((await asAgent('POST', `/api/agent/mirror/move?dir=1&id=${plansDir}&path=${encodeURIComponent('Archive/Plans old')}`)).text);
+  assert.equal(mv.id, plansDir);
+  assert.equal(mv.path, 'Archive/Plans old', 'a folder renamed and moved on the computer: the same folder, renamed and moved here');
+  assert.ok(ok(await agent('GET', '/api/agent/mirror', devTok)).dirs.some(d => d.path === 'Archive/Plans old/2026/Empty one'), 'its contents travel with it');
+  const nfId = nf.data.id, nfV = JSON.parse((await asAgent('GET', '/api/agent/mirror')).text).files.find(f => f.id === nfId).v;
+  const fmv = JSON.parse((await asAgent('POST', `/api/agent/mirror/move?id=${nfId}&base=${nfV}&path=${encodeURIComponent('Archive/notes renamed.txt')}`)).text);
+  assert.ok(fmv.id === nfId && fmv.path === 'Archive/notes renamed.txt', 'a file renamed and moved: the same file (versions stay)');
+  assert.equal((await asAgent('POST', `/api/agent/mirror/move?id=${nfId}&base=stale&path=x.txt`)).status, 409, 'not if it changed on the website meanwhile');
+  assert.equal((await asAgent('POST', `/api/agent/mirror/move?dir=1&id=${plansDir}&path=${encodeURIComponent('Archive/Plans old/2026/inside')}`)).status, 400, 'a folder cannot go into itself');
+  assert.equal((await asAgent('DELETE', `/api/agent/mirror/dir/${plansDir}`)).status, 409, 'a folder that still holds something is not deleted');
+  const emptyOne = ok(await agent('GET', '/api/agent/mirror', devTok)).dirs.find(d => d.path.endsWith('Empty one')).id;
+  assert.equal((await asAgent('DELETE', `/api/agent/mirror/dir/${emptyOne}`)).status, 200);
+  assert.ok(ok(await PO.get('/api/trash')).some(t => t.id === emptyOne), 'an empty folder deleted on the computer: in the website trash');
+  assert.equal((await asAgent('DELETE', `/api/agent/mirror/dir/${home.id}`)).status, 404, 'My files itself can never be deleted this way');
+  pass('My files in sync both ways: changes push a notice, the agent lists and fetches its own folder only, its new files, edits, deletions, folders, renames and moves come back with version checks');
 
   const gone2 = ok(await PO.upload(home.id, 'temp.txt', 'bye')).id;
   ok(await PO.post('/api/devices/send', { ids: [gone2] }));
