@@ -3,41 +3,11 @@
 package main
 
 /*
-#cgo CFLAGS: -x objective-c -fobjc-arc
+#cgo CFLAGS: -fobjc-arc
 #cgo LDFLAGS: -framework Cocoa
-#import <Cocoa/Cocoa.h>
-
-extern void goHandleURL(char *url);
-
-// macOS hands myfiles:// links to an app as "get URL" Apple events, not as program arguments.
-@interface CFURLHandler : NSObject
-- (void)handle:(NSAppleEventDescriptor *)event withReply:(NSAppleEventDescriptor *)reply;
-@end
-
-@implementation CFURLHandler
-- (void)handle:(NSAppleEventDescriptor *)event withReply:(NSAppleEventDescriptor *)reply {
-	NSString *s = [[event paramDescriptorForKeyword:keyDirectObject] stringValue];
-	if (s != nil) goHandleURL((char *)[s UTF8String]);
-}
-@end
-
-static CFURLHandler *cfHandler;
-
-static void cfRegisterURLHandler(void) {
-	if (cfHandler == nil) cfHandler = [CFURLHandler new];
-	[[NSAppleEventManager sharedAppleEventManager] setEventHandler:cfHandler
-		andSelector:@selector(handle:withReply:) forEventClass:kInternetEventClass andEventID:kAEGetURL];
-}
-
-// Registered as early as possible too, so the link that launched the app is not missed.
-__attribute__((constructor)) static void cfEarly(void) { cfRegisterURLHandler(); }
-
-// Hidden mode: no status item, but the app still needs its event loop to receive links.
-static void cfRunHidden(void) {
-	[NSApplication sharedApplication];
-	[NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
-	[NSApp run];
-}
+// Implemented in urlevents_darwin.m (Objective-C).
+void cfRegisterURLHandler(void);
+void cfRunHidden(void);
 */
 import "C"
 
