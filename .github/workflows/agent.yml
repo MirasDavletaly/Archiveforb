@@ -1,0 +1,71 @@
+# Builds the auto-save agent installers. The Mac .dmg needs macOS (the menu bar code uses Apple's frameworks);
+# the Windows .exe and Linux .deb build anywhere, here on Linux. Download them from the run's "installers"
+# artifact and put them into downloads/ for the website's Download button.
+#
+# Signing is optional and only happens when the repository has these secrets (Settings → Secrets → Actions):
+#   Mac:     MACOS_CERT_P12, MACOS_CERT_PASSWORD (Developer ID Application), and for notarization
+#            APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD
+#   Windows: WINDOWS_PFX (base64 of a code-signing .pfx), WINDOWS_PFX_PASSWORD
+name: Agent installers
+
+on:
+  push:
+    paths: ['agent/**', '.github/workflows/agent.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+      - name: Build CompanyFiles.dmg (universal; signed and notarized when the secrets exist)
+        run: sh agent/build-mac.sh
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-mac
+          path: downloads/CompanyFiles.dmg
+          if-no-files-found: error
+
+  windows-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+      - name: Windows certificate (only when the secret exists)
+        env:
+          WINDOWS_PFX: ${{ secrets.WINDOWS_PFX }}
+        run: |
+          if [ -n "$WINDOWS_PFX" ]; then
+            sudo apt-get install -y osslsigncode >/dev/null
+            printf '%s' "$WINDOWS_PFX" | base64 --decode > "$RUNNER_TEMP/sign.pfx"
+            echo "SIGN_PFX=$RUNNER_TEMP/sign.pfx" >> "$GITHUB_ENV"
+          fi
+      - name: Build CompanyFiles-Setup.exe and company-files-agent_amd64.deb
+        run: sh agent/build.sh
+        env:
+          SIGN_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+      - run: rm -f "$RUNNER_TEMP/sign.pfx"
+        if: always()
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-windows-linux
+          path: |
+            downloads/CompanyFiles-Setup.exe
+            downloads/company-files-agent_amd64.deb
+          if-no-files-found: error

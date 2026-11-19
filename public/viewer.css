@@ -1,0 +1,22 @@
+html, body { height: 100%; margin: 0; }
+body { background: #e8ecea; color: #18201d; font: 14px/1.45 system-ui, sans-serif; }
+#pdf { position: absolute; inset: 0; }
+#fail { position: absolute; inset: auto 0 40% 0; margin: 0 16px; text-align: center; }
+#loading { position: absolute; inset: 0; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background: inherit; }
+#loading[hidden] { display: none; }
+#loading .track { width: min(320px, 70vw); height: 6px; border-radius: 3px; background: #cdd5d1; overflow: hidden; }
+#loading i { display: block; height: 100%; width: 0; background: #18201d; transition: width .2s; }
+#loading p { margin: 0; color: #56625c; font-variant-numeric: tabular-nums; }
+@media (prefers-color-scheme: dark) {
+  body { background: #121715; color: #e2e8e4; }
+  #loading .track { background: #2e3733; }
+  #loading i { background: #c9a55d; }
+  #loading p { color: #9aa7a0; }
+}
+:root[data-theme="light"] body { background: #e8ecea; color: #18201d; }
+:root[data-theme="light"] #loading .track { background: #cdd5d1; }
+:root[data-theme="light"] #loading i { background: #18201d; }
+:root[data-theme="dark"] body { background: #121715; color: #e2e8e4; }
+:root[data-theme="dark"] #loading .track { background: #2e3733; }
+:root[data-theme="dark"] #loading i { background: #c9a55d; }
+:root[data-theme="dark"] #loading p { color: #9aa7a0; }

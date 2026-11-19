@@ -1,0 +1,11 @@
+node_modules/
+data/
+.env
+backup/
+# built installers and build leftovers (made by agent/build.*, or downloaded from the Actions run)
+downloads/*
+!downloads/README.txt
+agent/build/
+*.syso
+public/**/*.br
+public/**/*.gz

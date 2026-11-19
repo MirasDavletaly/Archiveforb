@@ -1,0 +1,21 @@
+{
+  "TCP": { "443": { "HTTPS": true } },
+  "Web": {
+    "${TS_CERT_DOMAIN}:443": {
+      "Handlers": {
+        "/": { "Proxy": "http://127.0.0.1:9980" },
+        "/cool/convert-to": { "Text": "Not available.\n" },
+        "/lool/convert-to": { "Text": "Not available.\n" },
+        "/cool/extract-link-targets": { "Text": "Not available.\n" },
+        "/cool/extract-document-structure": { "Text": "Not available.\n" },
+        "/cool/transform-document-structure": { "Text": "Not available.\n" },
+        "/cool/get-thumbnail": { "Text": "Not available.\n" },
+        "/cool/render-search-result": { "Text": "Not available.\n" },
+        "/cool/adminws": { "Text": "Not available.\n" },
+        "/hosting/wopiAccessCheck": { "Text": "Not available.\n" },
+        "/browser/dist/admin": { "Text": "Not available.\n" }
+      }
+    }
+  },
+  "AllowFunnel": { "${TS_CERT_DOMAIN}:443": true }
+}
