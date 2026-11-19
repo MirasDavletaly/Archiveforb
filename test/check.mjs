@@ -681,14 +681,14 @@ try {
   frames(ws.head); // the first frame can arrive together with the handshake
   ws.on('data', frames);
   await pause(100);
-  assert.deepEqual(pushed.at(-1), { type: 'queue' }, 'on connect the agent is told to check its queue');
+  assert.deepEqual(pushed.slice(-2), [{ type: 'queue' }, { type: 'mirror' }], 'on connect the agent is told to check its queue and My files');
   assert.deepEqual(ok(await PO.get('/api/devices')).map(d => [d.name, d.online]), [['Pavel laptop', true]]);
   const badWs = await new Promise(res => http.request({ host: '127.0.0.1', port: server.address().port, path: '/api/agent/ws', headers: { connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13', 'sec-websocket-key': 'x', authorization: 'Bearer nope-nope-nope-nope-nope' } }).on('response', r => res(r.statusCode)).on('upgrade', () => res(101)).end());
   assert.equal(badWs, 401, 'no WebSocket without a valid token');
   const sentNow = ok(await PO.post('/api/devices/send', { ids: [docs, passport] }));
   assert.deepEqual(sentNow.devices, ['Pavel laptop']);
   await pause(100);
-  assert.equal(pushed.length, 2, 'sending pushes a queue notice at once');
+  assert.equal(pushed.filter(p => p.type === 'queue').length, 2, 'sending pushes a queue notice at once');
   let aq = ok(await agent('GET', '/api/agent/queue', devTok));
   assert.ok(aq.some(x => x.path === 'Docs/from-friend.txt') && aq.some(x => x.path === 'passport.pdf'), 'folders keep their structure');
   const one1 = aq.find(x => x.path === 'passport.pdf');
@@ -696,6 +696,38 @@ try {
   ok(await agent('POST', `/api/agent/files/${one1.id}/done`, devTok, { result: 'saved' }));
   assert.ok(!ok(await agent('GET', '/api/agent/queue', devTok)).some(x => x.id === one1.id), 'saved files leave the queue');
   assert.ok(app.db.get(`SELECT 1 FROM audit WHERE action = 'saved to computer "Pavel laptop"' AND node_id = ?`, passport));
+
+  // My files kept in sync both ways: any change in the personal folder pushes "mirror"; the agent lists and
+  // fetches, and sends its own changes back (a new file, an edit based on the version it had, a deletion).
+  const mirrorPushes = () => pushed.filter(p => p.type === 'mirror').length;
+  const mp = mirrorPushes();
+  const mfile = ok(await PO.upload(home.id, 'mirror me.txt', 'from the website')).id;
+  await pause(1300);
+  assert.equal(mirrorPushes(), mp + 1, 'a change in My files tells the computer within a second');
+  const ml = ok(await agent('GET', '/api/agent/mirror', devTok));
+  const mi = ml.files.find(f => f.id === mfile);
+  assert.ok(mi && mi.path === 'mirror me.txt' && mi.v && ml.since > 0, 'the list has the file, its path and its version');
+  assert.ok(ml.files.some(f => f.path === 'Docs/from-friend.txt'), 'paths are relative to My files');
+  const asAgent = (method, url, body) => fetch(base + url, { method, headers: { authorization: `Bearer ${devTok}`, ...(body ? { 'content-type': 'application/octet-stream' } : {}) }, body: body && Buffer.from(body) })
+    .then(async r => ({ status: r.status, headers: r.headers, text: await r.text() }));
+  const mget = await asAgent('GET', `/api/agent/mirror/${mfile}`);
+  assert.ok(mget.text === 'from the website' && mget.headers.get('x-version') === mi.v);
+  const notMine = ok(await PF3.upload(space(await spaces(PF3), 'p.friend').id, 'not yours.txt', 'x')).id;
+  assert.equal((await asAgent('GET', `/api/agent/mirror/${notMine}`)).status, 404, 'files outside My files are not served');
+  const putM = (q, text) => asAgent('PUT', `/api/agent/mirror/file?${new URLSearchParams(q)}`, text).then(r => ({ ...r, data: JSON.parse(r.text) }));
+  const nf = await putM({ path: 'From laptop/notes#1.txt' }, 'typed on the laptop');
+  assert.equal(nf.data.path, 'From laptop/notes_1.txt', 'a new file from the computer lands in a new folder; characters the website does not allow become "_"');
+  assert.equal((await putM({ path: '../escape.txt' }, 'x')).data.path, 'file/escape.txt', 'paths cannot climb out of My files');
+  const med = await putM({ id: mfile, base: mi.v }, 'edited on the laptop');
+  assert.equal(ok(await PO.get(`/api/nodes/${mfile}/content`)).toString(), 'edited on the laptop');
+  assert.ok(ok(await PO.get(`/api/nodes/${mfile}/versions`)).length >= 1, 'an edit from the computer is a new version');
+  assert.equal((await putM({ id: mfile, base: mi.v }, 'stale')).status, 409, 'an edit of an older version never replaces a newer one');
+  assert.equal((await asAgent('DELETE', `/api/agent/mirror/${mfile}?base=${mi.v}`)).status, 409, 'nor does a stale deletion');
+  assert.equal((await asAgent('DELETE', `/api/agent/mirror/${mfile}?base=${med.data.v}`)).status, 200);
+  assert.ok(ok(await PO.get('/api/trash')).some(t => t.id === mfile), 'deleted on the computer: in the website trash');
+  assert.ok(app.db.get(`SELECT 1 FROM audit WHERE action = 'moved to trash (deleted on computer "Pavel laptop")' AND node_id = ?`, mfile));
+  pass('My files in sync both ways: changes push a notice, the agent lists and fetches its own folder only, its new files, edits and deletions come back with version checks');
+
   const gone2 = ok(await PO.upload(home.id, 'temp.txt', 'bye')).id;
   ok(await PO.post('/api/devices/send', { ids: [gone2] }));
   ok(await PO.del(`/api/nodes/${gone2}`));

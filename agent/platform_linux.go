@@ -5,11 +5,13 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const trayNeedsICO = false
@@ -143,6 +145,44 @@ func detach(cmd *exec.Cmd) { cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true
 func registerURLEvents(func(string)) {}
 
 func runHidden(*App) { select {} }
+
+// moveToTrash follows the freedesktop.org trash spec (~/.local/share/Trash), which file managers show as Trash.
+func moveToTrash(p string) error {
+	base := os.Getenv("XDG_DATA_HOME")
+	if base == "" {
+		h, _ := os.UserHomeDir()
+		base = filepath.Join(h, ".local", "share")
+	}
+	trash := filepath.Join(base, "Trash")
+	for _, d := range []string{"files", "info"} {
+		if err := os.MkdirAll(filepath.Join(trash, d), 0o700); err != nil {
+			return err
+		}
+	}
+	name, ext := filepath.Base(p), filepath.Ext(p)
+	for i := 0; i < 1000; i++ {
+		n := name
+		if i > 0 {
+			n = fmt.Sprintf("%s.%d%s", strings.TrimSuffix(name, ext), i, ext)
+		}
+		info := filepath.Join(trash, "info", n+".trashinfo")
+		f, err := os.OpenFile(info, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if os.IsExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(f, "[Trash Info]\nPath=%s\nDeletionDate=%s\n", (&url.URL{Path: p}).EscapedPath(), time.Now().Format("2006-01-02T15:04:05"))
+		f.Close()
+		if err := os.Rename(p, filepath.Join(trash, "files", n)); err != nil {
+			os.Remove(info)
+			return err // another disk: left where it is
+		}
+		return nil
+	}
+	return fmt.Errorf("no free name in the trash")
+}
 
 func installIfNeeded(string) bool { return false }
 

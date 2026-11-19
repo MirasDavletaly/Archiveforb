@@ -1550,6 +1550,29 @@ export function createApp(cfg = loadConfig()) {
     sockets.delete(deviceId);
   }
 
+  // "My files" stay copied on the person's computers while their agent runs (decided 2026-11-19: only the personal
+  // folder, only what changes after the computer was connected, changes replace the copy, deletions delete it).
+  // Any change inside a personal folder, however it is made, tells its owner's online computers to compare.
+  const homeOf = user => db.get('SELECT * FROM nodes WHERE parent_id = ? AND name = ? AND is_dir = 1 AND deleted_at IS NULL', db.ids.roots.personal, user.login);
+  const contentVersion = n => A.sha256(String(n.blob)).slice(0, 20); // changes with the content, not with a rename
+  const mirrorSoon = new Map(); // device id -> timer: a burst of changes (a folder upload) becomes one notice
+  db.onTreeChange(ids => {
+    const homes = new Set();
+    for (const id of ids) {
+      const h = db.get('WITH RECURSIVE up(id, parent_id, d) AS (SELECT id, parent_id, 0 FROM nodes WHERE id = ? UNION ALL SELECT n.id, n.parent_id, up.d + 1 FROM nodes n JOIN up ON n.id = up.parent_id WHERE up.d < 200) SELECT id FROM up WHERE parent_id = ?', id, db.ids.roots.personal);
+      if (h) homes.add(h.id);
+    }
+    for (const home of homes) {
+      for (const d of db.all('SELECT d.id FROM devices d JOIN users u ON u.id = d.user_id JOIN nodes n ON n.name = u.login AND n.parent_id = ? WHERE n.id = ? AND d.revoked_at IS NULL', db.ids.roots.personal, home)) {
+        if (!online(d.id) || mirrorSoon.has(d.id)) continue;
+        mirrorSoon.set(d.id, setTimeout(() => {
+          mirrorSoon.delete(d.id);
+          notify(d.id, { type: 'mirror' });
+        }, 1000).unref());
+      }
+    }
+  });
+
   function agentAuth(req) {
     const m = /^Bearer ([\w-]{20,100})$/.exec(req.headers.authorization || '');
     const device = m && db.get('SELECT * FROM devices WHERE token = ? AND revoked_at IS NULL', A.sha256(m[1]));
@@ -1711,6 +1734,92 @@ export function createApp(cfg = loadConfig()) {
     sendFile(c, r.node.blob, r.node.size, r.node.name, false, `user ${c.user.login}`, () => audit(c, 'file', `saved to computer "${c.device.name}"`, pathOf(r.chain), r.node.id));
   });
 
+  // The list of files in "My files" (what the agent compares its copy with) and one file from it.
+  add('GET', '/api/agent/mirror', 'agent', c => {
+    const home = homeOf(c.user);
+    const files = [];
+    if (home) {
+      for (const { id } of db.all(`${SUBTREE} SELECT n.id FROM nodes n JOIN t ON n.id = t.id WHERE n.is_dir = 0 AND n.deleted_at IS NULL`, home.id)) {
+        const x = acl.resolve(c.ctx, id);
+        if (!x?.level) continue;
+        const at = x.chain.findIndex(n => n.id === home.id);
+        files.push({ id, path: x.chain.slice(at + 1).map(n => n.name).join('/'), size: x.node.size, v: contentVersion(x.node), modified: x.node.updated_at });
+      }
+    }
+    return { since: c.device.created_at, files };
+  });
+
+  function inHome(c, home, id) {
+    const x = home && acl.resolve(c.ctx, int(id));
+    if (!x?.level || x.node.is_dir || !x.chain.some(n => n.id === home.id)) fail(404, 'This file is no longer in My files.');
+    return x;
+  }
+  const relOf = (x, home) => x.chain.slice(x.chain.findIndex(n => n.id === home.id) + 1).map(n => n.name).join('/');
+
+  add('GET', '/api/agent/mirror/:id', 'agent', c => {
+    const x = inHome(c, homeOf(c.user), c.params.id);
+    c.res.setHeader('X-Version', contentVersion(x.node));
+    sendFile(c, x.node.blob, x.node.size, x.node.name, false, `user ${c.user.login}`, () => audit(c, 'file', `auto-saved to computer "${c.device.name}"`, pathOf(x.chain), x.node.id));
+  });
+
+  // The other way: what is added or edited in the computer's copy of My files is uploaded (an edit becomes a new
+  // version; base= is the version the computer had, so an edit never silently replaces a newer one), and what is
+  // deleted there goes to the website's trash. Names the website does not allow get "_" instead.
+  const NAME_BAD = /[^\p{L}\p{M}\p{N} ._()\[\],+&'№-]/gu;
+  function fitName(raw) {
+    let s = String(raw).normalize('NFC').replace(NAME_BAD, '_').replace(/_{2,}/g, '_').trim().replace(/^[.\s]+|[.\s]+$/g, '');
+    if (s.length > 120) {
+      const ext = /\.[^.]{1,10}$/.exec(s)?.[0] || '';
+      s = s.slice(0, 120 - ext.length).trim() + ext;
+    }
+    return cleanName(/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(s) ? `_${s}` : s || 'file'); // Windows device names
+  }
+
+  add('PUT', '/api/agent/mirror/file', 'agent', async c => {
+    const home = homeOf(c.user);
+    if (!home) fail(404, 'This account has no My files folder.');
+    const size = Number(c.req.headers['content-length']);
+    if (!Number.isSafeInteger(size) || size < 0) fail(411, 'The file size is missing.');
+    if (size > cfg.maxFile) fail(413, `Files larger than ${fmtBytes(cfg.maxFile)} cannot be uploaded.`);
+    let folderId = home.id, name;
+    if (c.query.get('id')) {
+      const x = inHome(c, home, c.query.get('id'));
+      if (contentVersion(x.node) !== c.query.get('base')) fail(409, 'It was changed on the website meanwhile.', 'changed');
+      folderId = x.node.parent_id;
+      name = x.node.name;
+    } else {
+      const segs = String(c.query.get('path') || '').split('/').filter(Boolean);
+      if (!segs.length || segs.length > 40) fail(400, 'Invalid path.');
+      name = fitName(segs.pop());
+      const dirs = segs.map(fitName);
+      if ([...acl.resolve(c.ctx, home.id).chain.map(n => n.name), ...dirs, name].join('/').length > PATH_MAX) fail(400, `The full path would be longer than ${PATH_MAX} characters.`);
+      db.tx(() => {
+        for (const seg of dirs) {
+          const ex = taken(folderId, seg);
+          if (ex && !ex.is_dir) fail(409, `"${seg}" is a file on the website, not a folder.`);
+          if (ex && (acl.resolve(c.ctx, ex.id)?.level || 0) < EDIT) fail(403, `You cannot add files to "${seg}".`);
+          const now = Date.now();
+          folderId = ex ? ex.id : db.run('INSERT INTO nodes(parent_id, name, is_dir, created_at, updated_at, updated_by) VALUES(?, ?, 1, ?, ?, ?)', folderId, seg, now, now, c.user.id).lastInsertRowid;
+        }
+      });
+    }
+    const r = acl.resolve(c.ctx, folderId);
+    if ((r?.level || 0) < EDIT) fail(403, 'You cannot add files here.');
+    checkPathLength(r.chain, name);
+    const blob = await receiveBlob(c, r.chain, size);
+    const made = placeFile(c, r, name, blob, size);
+    const x = acl.resolve(c.ctx, made.id);
+    return { id: made.id, path: relOf(x, home), v: contentVersion(x.node), modified: x.node.updated_at };
+  });
+
+  add('DELETE', '/api/agent/mirror/:id', 'agent', c => {
+    const x = inHome(c, homeOf(c.user), c.params.id);
+    if (contentVersion(x.node) !== c.query.get('base')) fail(409, 'It was changed on the website meanwhile.', 'changed');
+    if (x.parentLevel < EDIT) fail(403, 'You cannot delete files here.');
+    db.run('UPDATE nodes SET deleted_at = ?, deleted_by = ? WHERE id = ?', Date.now(), c.user.id, x.node.id);
+    audit(c, 'file', `moved to trash (deleted on computer "${c.device.name}")`, pathOf(x.chain), x.node.id);
+  });
+
   add('POST', '/api/agent/files/:qid/done', 'agent', async c => {
     const q = queued(c, int(c.params.qid));
     if (!q) fail(404, 'Not in the queue.');
@@ -1776,6 +1885,7 @@ export function createApp(cfg = loadConfig()) {
     });
     if (Date.now() - (who.device.seen_at || 0) > 60e3) db.run('UPDATE devices SET seen_at = ? WHERE id = ?', Date.now(), id);
     wsSend(socket, JSON.stringify({ type: 'queue' })); // fetch whatever was sent while it was off
+    wsSend(socket, JSON.stringify({ type: 'mirror' })); // and catch up with My files
   }
 
   add('GET', '/api/search', 'user', c => {

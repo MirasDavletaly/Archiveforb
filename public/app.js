@@ -1650,7 +1650,7 @@ async function computersCard() {
     toast(`"${d.name}" is disconnected.`);
     route();
   });
-  return card('Auto-save to your computer', 'Select files or folders and press Enter: they are saved into a folder on every computer you connect here (Documents / Company Files at first). A computer that is off gets them when it comes back on.',
+  return card('Auto-save to your computer', 'My files stay in sync with the "My files" folder on every computer you connect here (in Documents / Company Files at first): changes made on the website appear there, and what you add, edit or delete there comes back here. From other folders, select files and press Enter to save them to your computers. A computer that is off catches up when it comes back on.',
     h('div', { class: 'stack' },
       h('div', { class: 'row' },
         mine

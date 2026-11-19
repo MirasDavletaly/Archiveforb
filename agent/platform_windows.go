@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -140,6 +141,36 @@ func openURL(u string) {
 func registerURLEvents(func(string)) {}
 
 func runHidden(*App) { select {} }
+
+var procSHFileOperationW = windows.NewLazySystemDLL("shell32.dll").NewProc("SHFileOperationW")
+
+// SHFILEOPSTRUCTW (64-bit layout)
+type shFileOp struct {
+	Hwnd          uintptr
+	Func          uint32
+	From, To      *uint16
+	Flags         uint16
+	Aborted       int32
+	NameMappings  uintptr
+	ProgressTitle *uint16
+}
+
+// moveToTrash puts a file into the Recycle Bin. Where a drive has none, Windows asks before deleting for good.
+func moveToTrash(p string) error {
+	from, err := windows.UTF16FromString(p)
+	if err != nil {
+		return err
+	}
+	from = append(from, 0)                                                                     // a list of names, ended by a second NUL
+	op := shFileOp{Func: 3, From: &from[0], Flags: 0x0040 | 0x0010 | 0x0004 | 0x0400 | 0x4000} // FO_DELETE; ALLOWUNDO|NOCONFIRMATION|SILENT|NOERRORUI|WANTNUKEWARNING
+	if r, _, _ := procSHFileOperationW.Call(uintptr(unsafe.Pointer(&op))); r != 0 {
+		return fmt.Errorf("SHFileOperation error 0x%x", r)
+	}
+	if op.Aborted != 0 {
+		return fmt.Errorf("not moved to the Recycle Bin")
+	}
+	return nil
+}
 
 func copyFile(from, to string) error {
 	in, err := os.Open(from)

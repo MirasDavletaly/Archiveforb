@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,24 +23,34 @@ var errUnpaired = errors.New("this computer is no longer connected")
 // over HTTPS. On every (re)connect the whole queue is checked, so files sent while the computer was off arrive.
 type Syncer struct {
 	app    *App
-	kick   chan struct{}
+	kick   chan struct{} // the queue of files sent with Enter
+	mkick  chan struct{} // My files changed
 	cancel context.CancelFunc
 	busy   sync.Mutex
+	mbusy  sync.Mutex           // the My files round; also guards seen and skip
+	seen   map[string]sighting  // local files waiting to settle before they are sent
+	skip   map[string]time.Time // local paths not retried before then (the website refused them, or offline)
 }
 
 func startSyncer(a *App) *Syncer {
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Syncer{app: a, kick: make(chan struct{}, 1), cancel: cancel}
+	s := &Syncer{app: a, kick: make(chan struct{}, 1), mkick: make(chan struct{}, 1), cancel: cancel}
 	go s.socket(ctx)
-	go s.worker(ctx)
+	go s.loop(ctx, s.kick, s.run)
+	go s.loop(ctx, s.mkick, s.mirror)
+	go s.watchLocal(ctx)
 	return s
 }
 
 func (s *Syncer) stop() { s.cancel() }
 
-func (s *Syncer) poke() {
+func (s *Syncer) poke() { nudge(s.kick) }
+
+func (s *Syncer) pokeMirror() { nudge(s.mkick) }
+
+func nudge(ch chan struct{}) {
 	select {
-	case s.kick <- struct{}{}:
+	case ch <- struct{}{}:
 	default:
 	}
 }
@@ -73,11 +84,23 @@ func (s *Syncer) socket(ctx context.Context) {
 		s.app.setStatus("")
 		conn.SetReadLimit(64 << 10)
 		for {
-			_, _, err := conn.Read(ctx) // control frames (the server's pings) are answered inside Read
+			_, data, err := conn.Read(ctx) // control frames (the server's pings) are answered inside Read
 			if err != nil {
 				break
 			}
-			s.poke()
+			var msg struct {
+				Type string `json:"type"`
+			}
+			_ = json.Unmarshal(data, &msg)
+			switch msg.Type {
+			case "queue":
+				s.poke()
+			case "mirror":
+				s.pokeMirror()
+			default:
+				s.poke()
+				s.pokeMirror()
+			}
 		}
 		conn.CloseNow()
 		if ctx.Err() == nil {
@@ -86,18 +109,18 @@ func (s *Syncer) socket(ctx context.Context) {
 	}
 }
 
-// worker processes the queue when poked, and every 10 minutes in case a notice was missed.
-func (s *Syncer) worker(ctx context.Context) {
+// loop runs one job (the queue, or My files) when poked, and every 10 minutes in case a notice was missed.
+func (s *Syncer) loop(ctx context.Context, kick chan struct{}, job func(context.Context) error) {
 	tick := time.NewTicker(10 * time.Minute)
 	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-s.kick:
+		case <-kick:
 		case <-tick.C:
 		}
-		err := s.run(ctx)
+		err := job(ctx)
 		switch {
 		case errors.Is(err, errUnpaired):
 			s.app.unpaired()
@@ -108,12 +131,12 @@ func (s *Syncer) worker(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-time.After(15 * time.Minute):
-				s.poke()
+				nudge(kick)
 			}
 		case err != nil && ctx.Err() == nil:
-			log.Printf("queue: %v", err)
+			log.Printf("sync: %v", err)
 			s.app.setStatus("Some files could not be saved yet. Retrying…")
-			time.AfterFunc(time.Minute, s.poke)
+			time.AfterFunc(time.Minute, func() { nudge(kick) })
 		}
 	}
 }

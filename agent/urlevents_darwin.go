@@ -5,13 +5,28 @@ package main
 /*
 #cgo CFLAGS: -fobjc-arc
 #cgo LDFLAGS: -framework Cocoa
+#include <stdlib.h>
 // Implemented in urlevents_darwin.m (Objective-C).
 void cfRegisterURLHandler(void);
 void cfRunHidden(void);
+int cfTrash(const char *path);
 */
 import "C"
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+	"unsafe"
+)
+
+func moveToTrash(p string) error {
+	cs := C.CString(p)
+	defer C.free(unsafe.Pointer(cs))
+	if code := C.cfTrash(cs); code != 0 {
+		return fmt.Errorf("not moved to the Trash (error %d)", int(code))
+	}
+	return nil
+}
 
 var (
 	urlMu      sync.Mutex

@@ -53,11 +53,33 @@ func (a *API) request(method, path string, body any) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", userAgent())
-	req.Header.Set("X-Requested-With", "fetch")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	return a.do(req)
+}
+
+// upload sends a file's bytes (size known up front) and decodes the JSON answer into out.
+func (a *API) upload(method, path string, file io.Reader, size int64, out any) error {
+	req, err := http.NewRequest(method, a.Server+path, file)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = size
+	req.Header.Set("Content-Type", "application/octet-stream")
+	client := *a.http
+	client.Timeout = 0 // a big file on a slow line takes long; a dead line still fails at the transport
+	res, err := (&API{Server: a.Server, Token: a.Token, http: &client}).do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	return json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(out)
+}
+
+func (a *API) do(req *http.Request) (*http.Response, error) {
+	req.Header.Set("User-Agent", userAgent())
+	req.Header.Set("X-Requested-With", "fetch")
 	if a.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+a.Token)
 	}

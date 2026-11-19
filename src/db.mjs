@@ -203,6 +203,30 @@ function wrap(raw) {
     // node_id lets the activity log hide rows about files a viewer cannot open.
     audit: (cat, actor, action, target = null, ip = null, nodeId = null) =>
       db.run('INSERT INTO audit(ts, cat, actor, action, target, ip, node_id) VALUES(?, ?, ?, ?, ?, ?, ?)', Date.now(), cat, actor ?? null, action, target ?? null, ip ?? null, nodeId ?? null),
+    // fn(folderIds) runs after any change to the tree made through this connection: a file or folder added, changed,
+    // renamed, moved, trashed, restored or erased (ids of the folders it was in, before and after). TEMP triggers
+    // live only on this connection, so other connections (backup, admin scripts) never call the missing function.
+    onTreeChange(fn) {
+      const touched = new Set();
+      let queued = false;
+      raw.function('cf_touched', (a, b) => {
+        if (a != null) touched.add(a);
+        if (b != null) touched.add(b);
+        if (!queued) {
+          queued = true;
+          setImmediate(() => {
+            queued = false;
+            const ids = [...touched];
+            touched.clear();
+            fn(ids);
+          });
+        }
+        return null;
+      });
+      raw.exec(`CREATE TEMP TRIGGER cf_nodes_insert AFTER INSERT ON main.nodes BEGIN SELECT cf_touched(NEW.parent_id, NULL); END;
+        CREATE TEMP TRIGGER cf_nodes_update AFTER UPDATE ON main.nodes BEGIN SELECT cf_touched(OLD.parent_id, NEW.parent_id); END;
+        CREATE TEMP TRIGGER cf_nodes_delete AFTER DELETE ON main.nodes BEGIN SELECT cf_touched(OLD.parent_id, NULL); END;`);
+    },
   };
   return db;
 }

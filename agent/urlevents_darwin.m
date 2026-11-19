@@ -26,6 +26,13 @@ void cfRegisterURLHandler(void) {
 // Registered as early as possible too, so the link that launched the app is not missed.
 __attribute__((constructor)) static void cfEarly(void) { cfRegisterURLHandler(); }
 
+// The system Trash (the app needs no access to ~/.Trash for this). Returns 0 when moved.
+int cfTrash(const char *path) {
+	NSError *err = nil;
+	BOOL ok = [[NSFileManager defaultManager] trashItemAtURL:[NSURL fileURLWithPath:[NSString stringWithUTF8String:path]] resultingItemURL:nil error:&err];
+	return ok ? 0 : (int)(err ? err.code : -1);
+}
+
 // Hidden mode: no status item, but the app still needs its event loop to receive links.
 void cfRunHidden(void) {
 	[NSApplication sharedApplication];
