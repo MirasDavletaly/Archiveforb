@@ -22,23 +22,28 @@ var errUnpaired = errors.New("this computer is no longer connected")
 // Syncer keeps a WebSocket open to the server, which only says "your queue changed"; the files themselves come
 // over HTTPS. On every (re)connect the whole queue is checked, so files sent while the computer was off arrive.
 type Syncer struct {
-	app    *App
-	kick   chan struct{} // the queue of files sent with Enter
-	mkick  chan struct{} // My files changed
-	cancel context.CancelFunc
-	busy   sync.Mutex
-	mbusy  sync.Mutex           // the My files round; also guards seen and skip
-	seen   map[string]sighting  // local files waiting to settle before they are sent
-	skip   map[string]time.Time // local paths not retried before then (the website refused them, or offline)
+	app       *App
+	kick      chan struct{} // the queue of files sent with Enter
+	mkick     chan struct{} // My files changed
+	cloudKick chan []int64  // files on demand: folders the website says changed
+	cancel    context.CancelFunc
+	busy      sync.Mutex
+	mbusy     sync.Mutex           // the My files round; also guards seen and skip
+	seen      map[string]sighting  // local files waiting to settle before they are sent
+	skip      map[string]time.Time // local paths not retried before then (the website refused them, or offline)
 }
 
 func startSyncer(a *App) *Syncer {
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Syncer{app: a, kick: make(chan struct{}, 1), mkick: make(chan struct{}, 1), cancel: cancel}
+	s := &Syncer{app: a, kick: make(chan struct{}, 1), mkick: make(chan struct{}, 1), cloudKick: make(chan []int64, 64), cancel: cancel}
 	go s.socket(ctx)
 	go s.loop(ctx, s.kick, s.run)
-	go s.loop(ctx, s.mkick, s.mirror)
-	go s.watchLocal(ctx)
+	if a.config().cloudMode() {
+		go s.runCloud(ctx.Done()) // Windows: files on demand for everything the person can open
+	} else {
+		go s.loop(ctx, s.mkick, s.mirror) // elsewhere: My files kept as a folder copy
+		go s.watchLocal(ctx)
+	}
 	return s
 }
 
@@ -60,6 +65,9 @@ func (s *Syncer) socket(ctx context.Context) {
 	for ctx.Err() == nil {
 		cfg := s.app.config()
 		u := strings.Replace(strings.Replace(cfg.Server, "https://", "wss://", 1), "http://", "ws://", 1) + "/api/agent/ws"
+		if cfg.cloudMode() {
+			u += "?cloud=1" // also hear which folders changed
+		}
 		dctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		conn, res, err := websocket.Dial(dctx, u, &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {"Bearer " + cfg.Token}, "User-Agent": {userAgent()}}})
 		cancel()
@@ -89,7 +97,8 @@ func (s *Syncer) socket(ctx context.Context) {
 				break
 			}
 			var msg struct {
-				Type string `json:"type"`
+				Type    string  `json:"type"`
+				Folders []int64 `json:"folders"`
 			}
 			_ = json.Unmarshal(data, &msg)
 			switch msg.Type {
@@ -97,6 +106,15 @@ func (s *Syncer) socket(ctx context.Context) {
 				s.poke()
 			case "mirror":
 				s.pokeMirror()
+			case "cloud":
+				select {
+				case s.cloudKick <- msg.Folders:
+				default: // a burst: everything is looked at
+					select {
+					case s.cloudKick <- []int64{-1}:
+					default:
+					}
+				}
 			default:
 				s.poke()
 				s.pokeMirror()

@@ -1650,7 +1650,7 @@ async function computersCard() {
     toast(`"${d.name}" is disconnected.`);
     route();
   });
-  return card('Auto-save to your computer', 'My files stay in sync with the "My files" folder on every computer you connect here (in Documents / Company Files at first): changes made on the website appear there, and what you add, edit or delete there comes back here. From other folders, select files and press Enter to save them to your computers. A computer that is off catches up when it comes back on.',
+  return card('Your files on your computer', 'On Windows, Company Files appears in File Explorer like OneDrive: everything you can open here shows up, files download when you open them, and whatever you add, edit, rename or delete there comes back here (it then stays on the computer only as an icon, unless you choose "Always keep on this device"). On Mac and Linux, My files is kept in sync as a folder. Select files and press Enter to save copies to your computers.',
     h('div', { class: 'stack' },
       h('div', { class: 'row' },
         mine

@@ -65,6 +65,8 @@ try {
   // 1. pairing with a code from the website
   const code = (await U.req('POST', '/api/devices/pair-code')).code;
   const p = await agent('pair', code, '--server', base, '--folder', ROOT, '--yes');
+  // folder mode: on Windows the default is the cloud folder in the real profile, which a test must never touch
+  fs.writeFileSync(path.join(CFG, 'agent.json'), JSON.stringify({ ...JSON.parse(fs.readFileSync(path.join(CFG, 'agent.json'), 'utf8')), no_cloud: true }));
   expect(`pair: "${p.out.trim().split('\n').pop()}"`, p.code === 0 && /Connected as Pavel Owner/.test(p.out));
   const devices = await U.req('GET', '/api/devices');
   expect(`the website lists the computer (${devices.map(d => d.name + '/' + d.os).join(', ')})`, devices.length === 1);
@@ -133,7 +135,7 @@ try {
   fs.mkdirSync(evilRoot, { recursive: true });
   const cfg2 = path.join(W, 'config-evil');
   fs.mkdirSync(cfg2);
-  fs.writeFileSync(path.join(cfg2, 'agent.json'), JSON.stringify({ server: 'http://127.0.0.1:8817', token: 'x'.repeat(43), user: 'test', folder: evilRoot, autostart: false, initialized: true }));
+  fs.writeFileSync(path.join(cfg2, 'agent.json'), JSON.stringify({ server: 'http://127.0.0.1:8817', token: 'x'.repeat(43), user: 'test', folder: evilRoot, autostart: false, initialized: true, no_cloud: true }));
   await run(EXE, ['--config', cfg2, 'sync', '--once'], { timeout: 30000, windowsHide: true }).catch(() => {});
   fake.close();
   const outside = fs.readdirSync(path.join(W, 'evil')).filter(f => f !== 'root');

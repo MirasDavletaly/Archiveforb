@@ -1070,11 +1070,13 @@ export function createApp(cfg = loadConfig()) {
     sendFile(c, r.node.blob, r.node.size, r.node.name, c.query.get('inline') === '1', `user ${c.user.login}`, what => audit(c, 'file', what, pathOf(r.chain), r.node.id));
   });
 
-  add('PATCH', '/api/nodes/:id', 'user', async c => {
-    const r = need(c, c.params.id, EDIT);
+  add('PATCH', '/api/nodes/:id', 'user', async c => moveNode(c, c.params.id, await body(c)));
+
+  // Rename and/or move (b.name, b.parent_id), with every rule of the website; the desktop agent uses it too.
+  function moveNode(c, id, b) {
+    const r = need(c, id, EDIT);
     if (r.node.system) fail(403, 'This folder is managed by IT and cannot be renamed or moved.');
     if (r.parentLevel < EDIT) fail(403, 'You need Edit access to the folder this is in.');
-    const b = await body(c);
     let name = r.node.name;
     let dest = r.chain.slice(0, -1);
     let carried = false;
@@ -1108,19 +1110,22 @@ export function createApp(cfg = loadConfig()) {
     // A rename never touches parent_id, so it cannot undo a move made in the meantime.
     if (moving) unique(() => db.run('UPDATE nodes SET name = ?, parent_id = ?, updated_at = ?, updated_by = ? WHERE id = ?', name, dest.at(-1).id, Date.now(), c.user.id, r.node.id));
     else unique(() => db.run('UPDATE nodes SET name = ?, updated_at = ?, updated_by = ? WHERE id = ?', name, Date.now(), c.user.id, r.node.id));
-    if (moving) audit(c, 'file', `${carried ? 'ALERT moved with its own access settings' : 'moved'}`, `${pathOf(r.chain)} → ${pathOf(dest)} / ${name}`, r.node.id);
-    else audit(c, 'file', 'renamed', `${pathOf(r.chain)} → ${name}`, r.node.id);
+    const how = c.device ? ` (on computer "${c.device.name}")` : '';
+    if (moving) audit(c, 'file', `${carried ? 'ALERT moved with its own access settings' : 'moved'}${how}`, `${pathOf(r.chain)} → ${pathOf(dest)} / ${name}`, r.node.id);
+    else audit(c, 'file', `renamed${how}`, `${pathOf(r.chain)} → ${name}`, r.node.id);
     return { id: r.node.id };
-  });
+  }
 
-  add('DELETE', '/api/nodes/:id', 'user', c => {
-    const r = need(c, c.params.id, EDIT);
+  add('DELETE', '/api/nodes/:id', 'user', c => trashNode(c, c.params.id));
+
+  function trashNode(c, id) {
+    const r = need(c, id, EDIT);
     if (r.node.system) fail(403, 'This folder is managed by IT and cannot be deleted.');
     if (r.parentLevel < EDIT) fail(403, 'You need Edit access to the folder this is in.');
     guardHidden(c, r);
     db.run('UPDATE nodes SET deleted_at = ?, deleted_by = ? WHERE id = ?', Date.now(), c.user.id, r.node.id);
-    audit(c, 'file', 'moved to trash', pathOf(r.chain), r.node.id);
-  });
+    audit(c, 'file', `moved to trash${c.device ? ` (deleted on computer "${c.device.name}")` : ''}`, pathOf(r.chain), r.node.id);
+  }
 
   add('GET', '/api/trash', 'user', c => {
     const rows = db.all(
@@ -1542,8 +1547,8 @@ export function createApp(cfg = loadConfig()) {
   const PAIR_ABC = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   const sockets = new Map(); // device id -> Set of agent WebSockets
   const online = id => (sockets.get(id)?.size || 0) > 0;
-  function notify(deviceId, msg = { type: 'queue' }) {
-    for (const s of sockets.get(deviceId) || []) wsSend(s, JSON.stringify(msg));
+  function notify(deviceId, msg = { type: 'queue' }, which = () => true) {
+    for (const s of sockets.get(deviceId) || []) if (which(s)) wsSend(s, JSON.stringify(msg));
   }
   function dropDevice(deviceId) {
     for (const s of sockets.get(deviceId) || []) s.destroy();
@@ -1571,7 +1576,26 @@ export function createApp(cfg = loadConfig()) {
         }, 1000).unref());
       }
     }
+    // Files on demand: each online computer that asked for it hears which of the changed folders its person can see.
+    for (const [deviceId, set] of sockets) {
+      if (![...set].some(s => s.cloud)) continue;
+      const u = db.get('SELECT u.* FROM devices d JOIN users u ON u.id = d.user_id WHERE d.id = ? AND d.revoked_at IS NULL', deviceId);
+      if (!u) continue;
+      const ctx = acl.ctxFor(u);
+      const seen = ids.filter(id => { const r = acl.resolve(ctx, id); return r?.level && r.area !== 'confidential'; });
+      if (!seen.length) continue;
+      let p = cloudSoon.get(deviceId);
+      if (!p) {
+        cloudSoon.set(deviceId, (p = { folders: new Set() }));
+        setTimeout(() => {
+          cloudSoon.delete(deviceId);
+          notify(deviceId, { type: 'cloud', folders: [...p.folders].slice(0, 500) }, s => s.cloud);
+        }, 1000).unref();
+      }
+      for (const id of seen) p.folders.add(id);
+    }
   });
+  const cloudSoon = new Map(); // device id -> folder ids changed in the last second
 
   function agentAuth(req) {
     const m = /^Bearer ([\w-]{20,100})$/.exec(req.headers.authorization || '');
@@ -1801,6 +1825,104 @@ export function createApp(cfg = loadConfig()) {
     return { id: made.id, path: relOf(x, home), v: contentVersion(x.node), modified: x.node.updated_at };
   });
 
+  // ---- "Files on demand" (Windows agent, decided 2026-11-20): everything this person can open, as on the website ----
+  // The computer shows the whole tree as placeholders and fetches a file when it is opened. The same access rules as
+  // the website apply (Read stays read-only there), and confidential folders never reach computers.
+  const AREA_ALL = { general: 'All documents', departments: 'All departments', projects: 'All projects', management: 'Management files', archive: 'Whole archive', personal: 'My files' };
+  const cloudItem = (n, level) => ({ id: n.id, name: n.name, dir: !!n.is_dir, size: n.is_dir ? 0 : n.size, v: n.is_dir ? '' : contentVersion(n), modified: n.updated_at, created: n.created_at, readOnly: level < EDIT });
+  function cloudNode(c, id, min = READ) {
+    const r = need(c, id, min);
+    if (r.area === 'confidential') fail(403, 'Confidential files are not available on computers.');
+    return r;
+  }
+
+  // The top level: the same places as the website's sidebar (My files, departments, projects, shared folders).
+  add('GET', '/api/agent/cloud', 'agent', c => {
+    const out = [], used = new Set();
+    for (const s of acl.spaces(c.ctx)) {
+      if (s.area === 'confidential') continue;
+      let name = s.area === 'personal' && s.level === MANAGE ? 'My files' : s.root ? AREA_ALL[s.area] : s.name;
+      for (let i = 2; used.has(name.toLowerCase()); i++) name = `${s.name} (${i})`;
+      used.add(name.toLowerCase());
+      out.push({ ...cloudItem(db.get('SELECT * FROM nodes WHERE id = ?', s.id), s.level), name });
+    }
+    return out;
+  });
+
+  add('GET', '/api/agent/cloud/:id', 'agent', c => {
+    const r = cloudNode(c, c.params.id);
+    if (!r.node.is_dir) fail(400, 'Not a folder.');
+    const out = [];
+    for (const n of db.all('SELECT id FROM nodes WHERE parent_id = ? AND deleted_at IS NULL ORDER BY is_dir DESC, name', r.node.id)) {
+      const x = acl.resolve(c.ctx, n.id);
+      if (x?.level) out.push(cloudItem(x.node, x.level));
+    }
+    return out;
+  });
+
+  add('GET', '/api/agent/cloud/:id/content', 'agent', c => {
+    const r = cloudNode(c, c.params.id);
+    if (r.node.is_dir) fail(400, 'Not a file.');
+    c.res.setHeader('X-Version', contentVersion(r.node));
+    sendFile(c, r.node.blob, r.node.size, r.node.name, false, `user ${c.user.login}`, () => audit(c, 'file', `opened on computer "${c.device.name}"`, pathOf(r.chain), r.node.id));
+  });
+
+  // A new file in a folder, or (id=, base=) a new version of a file there.
+  add('PUT', '/api/agent/cloud/:id/files', 'agent', async c => {
+    let r = cloudNode(c, c.params.id, EDIT);
+    if (!r.node.is_dir) fail(400, 'Not a folder.');
+    let name = fitName(c.query.get('name') || '');
+    if (c.query.get('id')) {
+      const x = cloudNode(c, c.query.get('id'), EDIT);
+      if (x.node.is_dir || x.node.parent_id !== r.node.id) fail(400, 'That file is not in this folder.');
+      if (contentVersion(x.node) !== c.query.get('base')) fail(409, 'It was changed on the website meanwhile.', 'changed');
+      name = x.node.name;
+    }
+    const size = Number(c.req.headers['content-length']);
+    if (!Number.isSafeInteger(size) || size < 0) fail(411, 'The file size is missing.');
+    if (size > cfg.maxFile) fail(413, `Files larger than ${fmtBytes(cfg.maxFile)} cannot be uploaded.`);
+    checkPathLength(r.chain, name);
+    const blob = await receiveBlob(c, r.chain, size);
+    const made = placeFile(c, r, name, blob, size);
+    const x = acl.resolve(c.ctx, made.id);
+    return cloudItem(x.node, x.level);
+  });
+
+  add('POST', '/api/agent/cloud/:id/folders', 'agent', c => {
+    const r = cloudNode(c, c.params.id, EDIT);
+    if (!r.node.is_dir) fail(400, 'Not a folder.');
+    const name = fitName(c.query.get('name') || '');
+    const ex = taken(r.node.id, name);
+    if (ex) {
+      const x = ex.is_dir && acl.resolve(c.ctx, ex.id);
+      if (!x?.level) fail(409, 'Something with this name already exists here.');
+      return cloudItem(x.node, x.level); // made on the website meanwhile, or by another computer: the same folder
+    }
+    checkPathLength(r.chain, name);
+    const now = Date.now();
+    const id = unique(() => db.run('INSERT INTO nodes(parent_id, name, is_dir, created_at, updated_at, updated_by) VALUES(?, ?, 1, ?, ?, ?)', r.node.id, name, now, now, c.user.id).lastInsertRowid);
+    audit(c, 'file', `created folder (on computer "${c.device.name}")`, `${pathOf(r.chain)} / ${name}`, id);
+    const x = acl.resolve(c.ctx, id);
+    return cloudItem(x.node, x.level);
+  });
+
+  // Renamed and/or moved on the computer (name=, parent=; base= for a file): the same item, every website rule applies.
+  add('POST', '/api/agent/cloud/:id/move', 'agent', c => {
+    const r = cloudNode(c, c.params.id, EDIT);
+    if (!r.node.is_dir && c.query.get('base') && contentVersion(r.node) !== c.query.get('base')) fail(409, 'It was changed on the website meanwhile.', 'changed');
+    const parent = c.query.get('parent');
+    if (parent) cloudNode(c, parent, EDIT);
+    moveNode(c, r.node.id, { name: c.query.get('name') ? fitName(c.query.get('name')) : undefined, parent_id: parent ? int(parent) : undefined });
+    const x = acl.resolve(c.ctx, r.node.id);
+    return cloudItem(x.node, x.level);
+  });
+
+  add('DELETE', '/api/agent/cloud/:id', 'agent', c => {
+    const r = cloudNode(c, c.params.id, EDIT);
+    if (!r.node.is_dir && c.query.get('base') && contentVersion(r.node) !== c.query.get('base')) fail(409, 'It was changed on the website meanwhile.', 'changed');
+    trashNode(c, r.node.id);
+  });
+
   // "A/B/name" below My files: creates the folders that are missing (names fitted) and returns the last folder's id
   // and the fitted name. With dir, all of it is folders.
   function homePath(c, home, raw, dir = false) {
@@ -1898,6 +2020,7 @@ export function createApp(cfg = loadConfig()) {
     const accept = crypto.createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
     socket.setNoDelay(true);
+    socket.cloud = new URL(req.url, 'http://x').searchParams.get('cloud') === '1'; // agents with files on demand
     const id = who.device.id;
     if (!sockets.has(id)) sockets.set(id, new Set());
     sockets.get(id).add(socket);

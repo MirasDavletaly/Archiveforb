@@ -25,8 +25,6 @@ jobs:
         with:
           go-version-file: agent/go.mod
           cache-dependency-path: agent/go.sum
-      - name: "Diagnostic (2026-11-20): the minimum macOS a build gets without the deployment target"
-        run: cd agent && CGO_ENABLED=1 go build -o /tmp/plain . && vtool -show-build /tmp/plain | grep -E 'minos|sdk' && sw_vers
       - name: Build CompanyFiles.dmg (universal; signed and notarized when the secrets exist)
         run: sh agent/build-mac.sh
         env:
@@ -63,6 +61,27 @@ jobs:
       - name: Two-way My files sync
         run: node --disable-warning=ExperimentalWarning agent/test/sync-e2e.mjs
         env: { AGENT: '${{ github.workspace }}/agent/build/agent-test', APP_URL: 'file://${{ github.workspace }}/', WORK: '${{ runner.temp }}' }
+
+  # Files on demand on a clean Windows machine (the Cloud Files API, as OneDrive uses it), and the folder mode.
+  windows-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Build the agent
+        run: cd agent; go build -ldflags "-H windowsgui" -o build/agent-test.exe .
+      - name: Files on demand
+        run: node --disable-warning=ExperimentalWarning agent/test/cloud-e2e.mjs
+        env: { AGENT: '${{ github.workspace }}\agent\build\agent-test.exe', APP_URL: 'file:///${{ github.workspace }}/', WORK: '${{ runner.temp }}' }
+      - name: Agent checks (folder mode)
+        run: node --disable-warning=ExperimentalWarning agent/test/e2e.mjs
+        env: { AGENT: '${{ github.workspace }}\agent\build\agent-test.exe', APP_URL: 'file:///${{ github.workspace }}/', WORK: '${{ runner.temp }}' }
 
   windows-linux:
     runs-on: ubuntu-24.04

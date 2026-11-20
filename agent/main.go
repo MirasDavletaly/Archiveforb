@@ -23,7 +23,7 @@ import (
 )
 
 var (
-	version       = "1.2.1"
+	version       = "1.3.0"
 	defaultServer = "" // -ldflags "-X main.defaultServer=https://files.example.ts.net"
 	appName       = "Company Files"
 	linkScheme    = "myfiles"
@@ -55,6 +55,11 @@ func main() {
 		fmt.Printf("server: %s\nconnected as: %s\nfolder: %s\nhidden: %v\n", c.Server, c.User, c.folder(), c.Hidden)
 	case "--uninstall":
 		uninstall(dir)
+	case "cloud-stop": // turn the cloud folder back into an ordinary one (downloaded files stay)
+		c := loadConfig(dir)
+		cloudTeardown(c)
+		c.CloudRegistered = ""
+		_ = c.save(dir)
 	case "--headless":
 		runApp(dir, "", true)
 	case "--version":
@@ -152,6 +157,7 @@ func cliPair(dir string, args []string) int {
 		return 2
 	}
 	a := newApp(dir, true)
+	a.cli = true // the running agent (or the next start) does the syncing
 	if folder != "" {
 		abs, _ := filepath.Abs(folder)
 		_ = a.update(func(c *Config) { c.Folder = abs })
@@ -185,8 +191,10 @@ func cliSync(dir string) int {
 	}
 	s := &Syncer{app: a}
 	err := s.run(nilContext())
-	if merr := s.mirror(nilContext()); err == nil {
-		err = merr
+	if !a.config().cloudMode() {
+		if merr := s.mirror(nilContext()); err == nil {
+			err = merr
+		}
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

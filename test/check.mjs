@@ -748,6 +748,48 @@ try {
   assert.equal((await asAgent('DELETE', `/api/agent/mirror/dir/${home.id}`)).status, 404, 'My files itself can never be deleted this way');
   pass('My files in sync both ways: changes push a notice, the agent lists and fetches its own folder only, its new files, edits, deletions, folders, renames and moves come back with version checks');
 
+  // Files on demand: the whole tree this person can open, with the website's rules.
+  const forPavel = ok(await PF3.post(`/api/nodes/${space(await spaces(PF3), 'p.friend').id}/folders`, { name: 'For Pavel' })).id;
+  ok(await PF3.put(`/api/nodes/${forPavel}/access`, { entries: [{ type: 'user', id: owner.id, level: 1 }] }));
+  ok(await PF3.upload(forPavel, 'read me.txt', 'shared, read only'));
+  const roots = ok(await agent('GET', '/api/agent/cloud', devTok));
+  const myRoot = roots.find(x => x.name === 'My files');
+  const sharedRoot = roots.find(x => x.name === 'For Pavel');
+  assert.ok(myRoot?.id === home.id && !myRoot.readOnly && sharedRoot?.readOnly, `the top level is what the website shows: ${roots.map(x => x.name + (x.readOnly ? ' (read only)' : '')).join(', ')}`);
+  const sharedKids = ok(await agent('GET', `/api/agent/cloud/${forPavel}`, devTok));
+  assert.ok(sharedKids.length === 1 && sharedKids[0].name === 'read me.txt' && sharedKids[0].readOnly && sharedKids[0].v);
+  const rm = await asAgent('GET', `/api/agent/cloud/${sharedKids[0].id}/content`);
+  assert.ok(rm.text === 'shared, read only' && rm.headers.get('x-version') === sharedKids[0].v, 'a file is fetched when it is opened');
+  assert.equal((await asAgent('PUT', `/api/agent/cloud/${forPavel}/files?name=nope.txt`, 'x')).status, 403, 'read only stays read only');
+  assert.equal((await asAgent('DELETE', `/api/agent/cloud/${sharedKids[0].id}`)).status, 403);
+  const cNew = JSON.parse((await asAgent('PUT', `/api/agent/cloud/${home.id}/files?name=${encodeURIComponent('On demand?.txt')}`, 'one')).text);
+  assert.ok(cNew.name === 'On demand_.txt' && cNew.v, 'a new file from the computer (name fitted)');
+  assert.equal((await asAgent('PUT', `/api/agent/cloud/${home.id}/files?id=${cNew.id}&base=stale`, 'two')).status, 409, 'an edit of an older version is refused');
+  const cV2 = JSON.parse((await asAgent('PUT', `/api/agent/cloud/${home.id}/files?id=${cNew.id}&base=${cNew.v}`, 'two')).text);
+  assert.ok(cV2.id === cNew.id && cV2.v !== cNew.v, 'an edit becomes a new version of the same file');
+  const cDir = JSON.parse((await asAgent('POST', `/api/agent/cloud/${home.id}/folders?name=Cloud%20folder`)).text);
+  assert.equal(JSON.parse((await asAgent('POST', `/api/agent/cloud/${home.id}/folders?name=Cloud%20folder`)).text).id, cDir.id, 'making a folder that exists gives the same folder');
+  const cMv = JSON.parse((await asAgent('POST', `/api/agent/cloud/${cNew.id}/move?parent=${cDir.id}&name=moved.txt&base=${cV2.v}`)).text);
+  assert.ok(cMv.id === cNew.id && cMv.name === 'moved.txt' && ok(await agent('GET', `/api/agent/cloud/${cDir.id}`, devTok)).some(x => x.id === cNew.id), 'renamed and moved: the same file');
+  assert.equal((await asAgent('POST', `/api/agent/cloud/${cNew.id}/move?parent=${forPavel}`)).status, 403, 'nothing moves into a read-only folder');
+  assert.equal((await asAgent('DELETE', `/api/agent/cloud/${cDir.id}`)).status, 200);
+  assert.ok(ok(await PO.get('/api/trash')).some(t => t.id === cDir.id), 'deleted on the computer: in the website trash');
+  // the push: a computer that asked for it hears which folders changed
+  const ws2 = await new Promise((res, rej) => {
+    const rq = http.request({ host: '127.0.0.1', port: server.address().port, path: '/api/agent/ws?cloud=1', headers: { connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13', 'sec-websocket-key': crypto.randomBytes(16).toString('base64'), authorization: `Bearer ${devTok}` } });
+    rq.on('upgrade', (_r, socket, head) => res(Object.assign(socket, { head }))).on('response', r => rej(new Error(`no upgrade: ${r.statusCode}`))).on('error', rej).end();
+  });
+  const cloudFrames = [];
+  const grab = d => { for (let i = 0; i + 2 <= d.length; i += 2 + d[i + 1]) if ((d[i] & 15) === 1) cloudFrames.push(JSON.parse(d.subarray(i + 2, i + 2 + d[i + 1]).toString())); };
+  grab(ws2.head);
+  ws2.on('data', grab);
+  ok(await PF3.upload(forPavel, 'new from friend.txt', 'hi'));
+  await pause(1400);
+  assert.ok(cloudFrames.some(f => f.type === 'cloud' && f.folders.includes(forPavel)), 'a change in a shared folder tells the computer which folder changed');
+  assert.ok(!pushed.some(f => f.type === 'cloud'), 'agents that did not ask for it get no such notices');
+  ws2.destroy();
+  pass('Files on demand: the agent sees the website\'s tree (no confidential), fetches on open, read only stays read only, new files, versions, folders, moves and deletions with the website\'s rules, change notices per folder');
+
   const gone2 = ok(await PO.upload(home.id, 'temp.txt', 'bye')).id;
   ok(await PO.post('/api/devices/send', { ids: [gone2] }));
   ok(await PO.del(`/api/nodes/${gone2}`));

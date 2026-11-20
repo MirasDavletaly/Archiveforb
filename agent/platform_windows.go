@@ -287,6 +287,7 @@ func uninstall(dir string) {
 	if c := loadConfig(dir); c.Token != "" {
 		_ = newAPI(c.Server, c.Token).call("POST", "/api/agent/unpair", nil, nil)
 	}
+	cloudTeardown(loadConfig(dir)) // the cloud folder becomes ordinary; downloaded files stay
 	_ = setAutostartFor("", false)
 	deleteTree(`Software\Classes\` + linkScheme)
 	deleteTree(uninstallKey)

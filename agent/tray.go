@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"companyfiles/agent/icon"
@@ -65,9 +66,20 @@ func (a *App) trayReady() {
 			select {
 			case <-open.ClickedCh:
 				p := a.config().folder()
+				if a.config().cloudMode() {
+					p = cloudRoot(a.config())
+				}
 				_ = os.MkdirAll(p, 0o755)
 				openPath(p)
 			case <-folder.ClickedCh:
+				if c := a.config(); c.cloudMode() {
+					cur := cloudRoot(c)
+					if p, ok := pickFolder("Choose where the Company Files cloud folder goes (a new, empty folder)", filepath.Dir(cur)); ok && p != "" && !strings.EqualFold(p, cur) {
+						go a.moveCloud(p)
+						message(c.name(), "The cloud folder is now:\n"+p+"\n\nFiles you downloaded before stay in the old folder as ordinary files.")
+					}
+					continue
+				}
 				cur := a.config().folder()
 				if p, ok := pickFolder("Choose where Company Files saves files", cur); ok && p != "" && p != cur {
 					_ = a.update(func(c *Config) { c.Folder = p })

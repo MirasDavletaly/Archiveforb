@@ -23,6 +23,7 @@ type App struct {
 	pairing  sync.Mutex
 	onChange func() // the tray repaints itself
 	ipc      *ipcServer
+	cli      bool // a one-off command (pair from a terminal): links, but starts no syncing
 }
 
 func newApp(dir string, headless bool) *App {
@@ -122,7 +123,10 @@ func (a *App) unpaired() {
 	log.Print("the server no longer accepts this computer; disconnecting")
 	_ = a.update(func(c *Config) { c.Token, c.DeviceID = "", 0 })
 	a.setStatus("")
-	go a.restartSync()
+	go func() {
+		a.restartSync()
+		a.endCloud()
+	}()
 	if !a.headless {
 		go message(a.config().name(), "This computer was disconnected from "+a.config().name()+" (on the website, or by IT). Files already saved stay in the folder.")
 	}
@@ -175,7 +179,9 @@ func (a *App) pair(server, code string, confirm func(PairInfo, string) bool) err
 		return err
 	}
 	_ = os.MkdirAll(folder, 0o755)
-	a.restartSync()
+	if !a.cli {
+		a.restartSync()
+	}
 	return nil
 }
 
@@ -202,7 +208,11 @@ func (a *App) handleLink(link string) {
 	switch {
 	case err == nil:
 		c := a.config()
-		message(c.name(), fmt.Sprintf("This computer is connected as %s.\n\nSelect files on the website and press Enter: they are saved to\n%s", c.User, c.folder()))
+		if c.cloudMode() {
+			message(c.name(), fmt.Sprintf("This computer is connected as %s.\n\n%s is now in File Explorer, on the left (like OneDrive): everything you can open on the website, downloaded when you open it. Folder: %s", c.User, c.name(), cloudRoot(c)))
+		} else {
+			message(c.name(), fmt.Sprintf("This computer is connected as %s.\n\nSelect files on the website and press Enter: they are saved to\n%s", c.User, c.folder()))
+		}
 	case errors.Is(err, errCancelled):
 	default:
 		log.Printf("pairing: %v", err)
@@ -219,6 +229,32 @@ func (a *App) disconnect() {
 	}
 	_ = a.update(func(c *Config) { c.Token, c.DeviceID = "", 0 })
 	a.setStatus("")
+	a.restartSync()
+	a.endCloud()
+}
+
+// endCloud: this computer stopped syncing; the cloud folder becomes an ordinary folder (downloaded files stay).
+func (a *App) endCloud() {
+	c := a.config()
+	if c.CloudRegistered == "" {
+		return
+	}
+	time.Sleep(time.Second) // the provider has let go of the folder
+	cloudTeardown(c)
+	_ = a.update(func(c *Config) { c.CloudRegistered = "" })
+}
+
+// moveCloud puts the cloud folder somewhere else: the old one becomes ordinary, the new one fills as it is opened.
+func (a *App) moveCloud(to string) {
+	a.mu.Lock()
+	old := a.syncer
+	a.syncer = nil
+	a.mu.Unlock()
+	if old != nil {
+		old.stop()
+	}
+	a.endCloud()
+	_ = a.update(func(c *Config) { c.CloudRoot = to })
 	a.restartSync()
 }
 

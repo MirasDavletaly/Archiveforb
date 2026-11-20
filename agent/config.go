@@ -17,7 +17,23 @@ type Config struct {
 	Hidden      bool   `json:"hidden,omitempty"`
 	Autostart   bool   `json:"autostart"`
 	Initialized bool   `json:"initialized"`
+	// Files on demand (Windows): where the cloud folder is (default %USERPROFILE%\<name>), and the registration that
+	// is in place ("id|folder"), so it is redone only when one of them changes. NoCloud keeps the older folder sync.
+	CloudRoot       string `json:"cloud_root,omitempty"`
+	CloudRegistered string `json:"cloud_registered,omitempty"`
+	NoCloud         bool   `json:"no_cloud,omitempty"`
 }
+
+// CloudProvider names the cloud folder registration with Windows (tests use their own, so they never touch a real one).
+func (c Config) CloudProvider() string {
+	if p := os.Getenv("COMPANYFILES_CLOUD_PROVIDER"); p != "" {
+		return p
+	}
+	return "CompanyFiles"
+}
+
+// cloudMode: files on demand instead of the My files folder copy.
+func (c Config) cloudMode() bool { return cloudSupported && !c.NoCloud }
 
 func configDir(override string) string {
 	if override != "" {

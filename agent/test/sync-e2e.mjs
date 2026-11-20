@@ -83,6 +83,7 @@ try {
   await sleep(50);
   const code = (await U.req('POST', '/api/devices/pair-code')).code;
   await agentCmd('pair', code, '--server', base, '--folder', ROOT, '--yes');
+  fs.writeFileSync(path.join(CFG, 'agent.json'), JSON.stringify({ ...JSON.parse(fs.readFileSync(path.join(CFG, 'agent.json'), 'utf8')), no_cloud: true })); // the folder sync, never the real cloud folder
   start();
 
   // ---- website → computer ----
