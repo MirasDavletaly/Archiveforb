@@ -1,8 +1,8 @@
-# Builds the auto-save agent installers. The Mac .dmg needs macOS (the menu bar code uses Apple's frameworks);
+﻿# Builds the auto-save agent installers. The Mac .dmg needs macOS (the menu bar code uses Apple's frameworks);
 # the Windows .exe and Linux .deb build anywhere, here on Linux. Download them from the run's "installers"
 # artifact and put them into downloads/ for the website's Download button.
 #
-# Signing is optional and only happens when the repository has these secrets (Settings → Secrets → Actions):
+# Signing is optional and only happens when the repository has these secrets (Settings в†’ Secrets в†’ Actions):
 #   Mac:     MACOS_CERT_P12, MACOS_CERT_PASSWORD (Developer ID Application), and for notarization either
 #            APPLE_API_KEY, APPLE_API_KEY_ID, APPLE_API_ISSUER (App Store Connect API key, preferred)
 #            or APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD
@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: agent/go.mod
+          go-version: '1.26.x' # the last Go that builds for macOS 12 (see build-mac.sh)
           cache-dependency-path: agent/go.sum
       - name: Build CompanyFiles.dmg (universal; signed and notarized when the secrets exist)
         run: sh agent/build-mac.sh
@@ -51,7 +51,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: agent/go.mod
+          go-version: '1.26.x' # the last Go that builds for macOS 12 (see build-mac.sh)
           cache-dependency-path: agent/go.sum
       - uses: actions/setup-node@v4
         with:
@@ -85,7 +85,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: agent/go.mod
+          go-version: '1.26.x' # the last Go that builds for macOS 12 (see build-mac.sh)
           cache-dependency-path: agent/go.sum
       - uses: actions/setup-node@v4
         with:
@@ -113,7 +113,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: agent/go.mod
+          go-version: '1.26.x' # the last Go that builds for macOS 12 (see build-mac.sh)
           cache-dependency-path: agent/go.sum
       - uses: actions/setup-node@v4
         with:
@@ -133,7 +133,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: agent/go.mod
+          go-version: '1.26.x' # the last Go that builds for macOS 12 (see build-mac.sh)
           cache-dependency-path: agent/go.sum
       - name: Windows certificate (only when the secret exists)
         env:

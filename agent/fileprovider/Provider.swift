@@ -284,7 +284,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                         return completionHandler(Item(try await api.info(id)), [], true, nil)
                     }
                 }
-                let e = entry ?? (try await api.info(id))
+                let e: Entry
+                if let entry { e = entry } else { e = try await api.info(id) }
                 // a move or upload answer has no parent: it is where the system just put it
                 completionHandler(e.parent == nil ? Item(e, parent: item.parentItemIdentifier) : Item(e), [], false, nil)
             } catch {

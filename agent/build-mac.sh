@@ -24,6 +24,10 @@ DMG=../downloads/CompanyFiles.dmg
 rm -rf "$TMP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" ../downloads
 
+# Go 1.27 and later build only for macOS 13 and later; Go 1.26 is the last that keeps macOS 12 Monterey.
+case "$(go env GOVERSION)" in
+  go1.2[7-9]*|go1.[3-9][0-9]*) echo "$(go env GOVERSION) cannot build for macOS 12; use Go 1.26" >&2; exit 1 ;;
+esac
 go test ./...
 go run ./tools/pack icons build
 iconutil -c icns build/AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns"
