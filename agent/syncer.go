@@ -38,13 +38,43 @@ func startSyncer(a *App) *Syncer {
 	s := &Syncer{app: a, kick: make(chan struct{}, 1), mkick: make(chan struct{}, 1), cloudKick: make(chan []int64, 64), cancel: cancel}
 	go s.socket(ctx)
 	go s.loop(ctx, s.kick, s.run)
-	if a.config().cloudMode() {
+	switch c := a.config(); {
+	case c.cloudMode():
 		go s.runCloud(ctx.Done()) // Windows: files on demand for everything the person can open
-	} else {
+	case c.driveMode():
+		go s.runDrive(ctx.Done()) // Mac: the network drive
+		if !c.MirrorDone {
+			go s.lastMirror(ctx)
+		}
+	default:
 		go s.loop(ctx, s.mkick, s.mirror) // elsewhere: My files kept as a folder copy
 		go s.watchLocal(ctx)
 	}
 	return s
+}
+
+// lastMirror: a Mac that kept a folder copy of My files before the drive sends its local changes one last time
+// (retried while offline), so nothing made there is left behind. The folder then stays as ordinary files.
+func (s *Syncer) lastMirror(ctx context.Context) {
+	if _, err := os.Stat(s.app.mirrorPath()); err == nil {
+		for try := 0; ; try++ {
+			err := s.mirror(ctx)
+			if err == nil || try == 30 || ctx.Err() != nil {
+				if err != nil {
+					log.Printf("last round of the folder copy: %v", err)
+				}
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Minute):
+			}
+		}
+	}
+	if ctx.Err() == nil {
+		_ = s.app.update(func(c *Config) { c.MirrorDone = true })
+	}
 }
 
 func (s *Syncer) stop() { s.cancel() }

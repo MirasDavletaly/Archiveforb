@@ -77,6 +77,16 @@ try {
   await run(EXE, ['--config', CFG, 'pair', code, '--server', base, '--yes'], { env, timeout: 60000 });
   const cfgFile = path.join(CFG, 'agent.json');
   fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile, 'utf8')), cloud_root: ROOT, initialized: true }));
+  // the chosen folder already holds an ordinary "My files" (as a 1.2 copy left it): it is merged, not left beside
+  const same = await upload(U, home, 'Same.txt', 'same text');
+  const differs = await upload(U, home, 'Differs.txt', 'website text');
+  const OLD = path.join(ROOT, 'My files');
+  fs.mkdirSync(path.join(OLD, 'Docs'), { recursive: true });
+  fs.writeFileSync(path.join(OLD, 'Same.txt'), 'same text');
+  const t = (await child(home, 'Same.txt')).updated_at / 1000;
+  fs.utimesSync(path.join(OLD, 'Same.txt'), t, t);
+  fs.writeFileSync(path.join(OLD, 'Differs.txt'), 'old local text');
+  fs.writeFileSync(path.join(OLD, 'Docs', 'Only here.txt'), 'only on this laptop');
   agent = spawn(EXE, ['--config', CFG, '--headless'], { env, stdio: 'ignore', windowsHide: true });
 
   // ---- registered with Windows, and the whole tree shows up as it is opened ----
@@ -86,6 +96,9 @@ try {
   const reportPath = path.join(ROOT, 'My files', 'Docs', 'Report.txt');
   expect(`files show up without being downloaded (cloud only, right size): ${top.join(', ')}`, await until(async () => (await stat(reportPath)).size === 9 && ((await attrs(reportPath)) & CLOUD_ONLY) !== 0));
   expect('opening a file downloads it', (await readFile(reportPath, 'utf8')) === 'report v1' && ((await attrs(reportPath)) & CLOUD_ONLY) === 0);
+  expect('an old copy of a website file becomes its icon (no new version)', await until(async () => ((await attrs(path.join(OLD, 'Same.txt'))) & CLOUD_ONLY) !== 0) && (await U.req('GET', `/api/nodes/${same}/versions`)).length === 0);
+  expect('an old file that differs goes up as a new version (the website keeps the one it had)', await until(async () => (await content(differs)) === 'old local text' && (await U.req('GET', `/api/nodes/${differs}/versions`)).length === 1));
+  expect('a file only in the old folder goes to the website', await until(async () => { const n = await child(docs, 'Only here.txt'); return n && (await content(n.id)) === 'only on this laptop'; }));
 
   // Explorer's Free up space (unpinned): the downloaded file goes back to cloud only
   await ps(`attrib -P +U '${reportPath.replace(/'/g, "''")}'`);

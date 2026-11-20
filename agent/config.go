@@ -22,6 +22,10 @@ type Config struct {
 	CloudRoot       string `json:"cloud_root,omitempty"`
 	CloudRegistered string `json:"cloud_registered,omitempty"`
 	NoCloud         bool   `json:"no_cloud,omitempty"`
+	// Network drive (Mac): pinned to Finder's Favorites once; MirrorDone: the old My files folder copy had its last
+	// round (its local changes went up) when this Mac switched to the drive.
+	DrivePinned bool `json:"drive_pinned,omitempty"`
+	MirrorDone  bool `json:"mirror_done,omitempty"`
 }
 
 // CloudProvider names the cloud folder registration with Windows (tests use their own, so they never touch a real one).
@@ -34,6 +38,9 @@ func (c Config) CloudProvider() string {
 
 // cloudMode: files on demand instead of the My files folder copy.
 func (c Config) cloudMode() bool { return cloudSupported && !c.NoCloud }
+
+// driveMode: the Mac's network drive instead of the My files folder copy (NoCloud keeps the folder copy).
+func (c Config) driveMode() bool { return driveSupported && !c.NoCloud }
 
 func configDir(override string) string {
 	if override != "" {

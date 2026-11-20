@@ -790,6 +790,61 @@ try {
   ws2.destroy();
   pass('Files on demand: the agent sees the website\'s tree (no confidential), fetches on open, read only stays read only, new files, versions, folders, moves and deletions with the website\'s rules, change notices per folder');
 
+  // Network drive for Macs (WebDAV): Finder's view of the same tree, with the computer's token as the password.
+  const davBase = `/dav/${encodeURIComponent('Company Files')}`;
+  const davAuthH = { authorization: 'Basic ' + Buffer.from(`computer:${devTok}`).toString('base64') };
+  const dv = (method, p, { body, headers = {} } = {}) => fetch(base + davBase + p, { method, headers: { ...davAuthH, ...headers }, body })
+    .then(async r => ({ status: r.status, headers: r.headers, text: await r.text() }));
+  const noAuth = await fetch(base + davBase + '/', { method: 'PROPFIND' });
+  assert.ok(noAuth.status === 401 && /Basic/.test(noAuth.headers.get('www-authenticate')), 'the drive asks for the password');
+  assert.equal((await fetch(base + davBase + '/', { method: 'PROPFIND', headers: { authorization: 'Basic ' + Buffer.from('x:wrong-token-wrong-token').toString('base64') } })).status, 401);
+  const top = await dv('PROPFIND', '/', { headers: { depth: '1' } });
+  assert.ok(top.status === 207 && top.text.includes(`${davBase}/My%20files/`) && top.text.includes(`${davBase}/For%20Pavel/`), 'the top level shows the same places as the website');
+  assert.ok(!/confidential/i.test(top.text), 'no confidential folders');
+  assert.equal((await dv('PUT', '/My%20files/drive.txt', { body: 'from Finder' })).status, 201, 'a new file from Finder');
+  assert.equal((await dv('GET', '/My%20files/drive.txt')).text, 'from Finder', 'and read back');
+  const driveId = ok(await PO.get(`/api/nodes/${home.id}`)).children.find(x => x.name === 'drive.txt').id;
+  assert.equal((await dv('PUT', '/My%20files/drive.txt', { body: 'edited in Finder' })).status, 204);
+  assert.equal(ok(await PO.get(`/api/nodes/${driveId}/versions`)).length, 1, 'writing it again makes a new version');
+  assert.equal((await dv('PUT', '/My%20files/empty first.txt', { body: '' })).status, 201);
+  assert.equal((await dv('PUT', '/My%20files/empty first.txt', { body: 'content' })).status, 204);
+  const emptyFirst = ok(await PO.get(`/api/nodes/${home.id}`)).children.find(x => x.name === 'empty first.txt').id;
+  assert.equal(ok(await PO.get(`/api/nodes/${emptyFirst}/versions`)).length, 0, 'the empty file Finder makes first is not kept as a version');
+  const chunked = await new Promise((res, rej) => {
+    const rq = http.request({ host: '127.0.0.1', port: server.address().port, method: 'PUT', path: davBase + '/My%20files/chunked.bin', headers: { ...davAuthH, 'transfer-encoding': 'chunked', 'x-expected-entity-length': '200000' } }, r => { r.resume(); r.on('end', () => res(r.statusCode)); }).on('error', rej);
+    for (let i = 0; i < 4; i++) rq.write(Buffer.alloc(50000, 65 + i));
+    rq.end();
+  });
+  assert.equal(chunked, 201, 'a big file sent in chunks without a length (as Finder does)');
+  assert.equal((await dv('GET', '/My%20files/chunked.bin')).text.length, 200000);
+  assert.equal((await dv('MKCOL', '/My%20files/From%20Finder')).status, 201, 'a new folder');
+  assert.equal((await dv('MKCOL', '/My%20files/From%20Finder')).status, 405, 'not twice');
+  assert.equal((await dv('MOVE', '/My%20files/drive.txt', { headers: { destination: `${base}${davBase}/My%20files/From%20Finder/moved.txt` } })).status, 201);
+  assert.ok(ok(await PO.get(`/api/nodes/${driveId}`)).node.name === 'moved.txt', 'renamed and moved: the same file (its versions stay)');
+  const listing = await dv('PROPFIND', '/My%20files/From%20Finder/', { headers: { depth: '1' } });
+  assert.ok(listing.text.includes('moved.txt') && listing.text.includes('<D:getcontentlength>16</D:getcontentlength>'), 'a folder lists its files with their sizes');
+  assert.equal((await dv('PUT', '/For%20Pavel/nope.txt', { body: 'x' })).status, 403, 'read only stays read only');
+  assert.equal((await dv('DELETE', '/For%20Pavel/read%20me.txt')).status, 403);
+  assert.equal((await dv('PUT', '/nope.txt', { body: 'x' })).status, 403, 'the top level only holds the places');
+  // Finder's own files and programs' temporary files stay in memory; a temporary file saved over a real one is a new version
+  assert.equal((await dv('PUT', '/My%20files/.DS_Store', { body: 'finder stuff' })).status, 201);
+  assert.equal((await dv('PUT', '/My%20files/From%20Finder/._moved.txt', { body: 'resource fork' })).status, 201);
+  assert.equal((await dv('GET', '/My%20files/.DS_Store')).text, 'finder stuff');
+  assert.ok(!ok(await PO.get(`/api/nodes/${home.id}`)).children.some(x => x.name.startsWith('.')), 'never among the company\'s files');
+  assert.ok((await dv('PROPFIND', '/My%20files/', { headers: { depth: '1' } })).text.includes('.DS_Store'), 'but Finder still sees them');
+  assert.equal((await dv('PUT', '/My%20files/From%20Finder/.moved.txt.sb-1234', { body: 'saved by a program' })).status, 201);
+  assert.equal((await dv('MOVE', '/My%20files/From%20Finder/.moved.txt.sb-1234', { headers: { destination: `${davBase}/My%20files/From%20Finder/moved.txt`, overwrite: 'T' } })).status, 204);
+  assert.equal(ok(await PO.get(`/api/nodes/${driveId}/content`)).toString(), 'saved by a program', 'a program saving through a temporary file: the same file gets the new content');
+  assert.equal(ok(await PO.get(`/api/nodes/${driveId}/versions`)).length, 2, '... as a new version');
+  assert.equal((await dv('MOVE', '/My%20files/From%20Finder/moved.txt', { headers: { destination: `${davBase}/My%20files/.hidden.txt` } })).status, 403, 'real files are never moved into memory');
+  const lock = await dv('LOCK', '/My%20files/From%20Finder/moved.txt', { body: '<?xml version="1.0"?><D:lockinfo xmlns:D="DAV:"/>' });
+  assert.ok(lock.status === 200 && /opaquelocktoken/.test(lock.headers.get('lock-token')), 'locks are granted (Finder writes only to drives that lock)');
+  assert.equal((await dv('DELETE', '/My%20files/From%20Finder/moved.txt')).status, 204);
+  assert.ok(ok(await PO.get('/api/trash')).some(t => t.id === driveId), 'deleted in Finder: in the website trash');
+  assert.equal((await dv('DELETE', '/My%20files')).status, 403, 'the places themselves cannot be deleted');
+  assert.ok(app.db.get(`SELECT 1 FROM audit WHERE action LIKE 'created folder on computer "Pavel laptop" (network drive)'`), 'logged with the computer\'s name');
+  pass('Network drive (WebDAV) for Macs: the computer\'s token is the password, the same places and rules as the website, files and folders made, read, renamed, moved and trashed, versions kept (also through programs\' temporary files), Finder\'s own files kept out, locks for Finder');
+
   const gone2 = ok(await PO.upload(home.id, 'temp.txt', 'bye')).id;
   ok(await PO.post('/api/devices/send', { ids: [gone2] }));
   ok(await PO.del(`/api/nodes/${gone2}`));

@@ -65,6 +65,10 @@ func (a *App) trayReady() {
 		for {
 			select {
 			case <-open.ClickedCh:
+				if a.config().driveMode() && a.paired() {
+					go driveOpen(a)
+					continue
+				}
 				p := a.config().folder()
 				if a.config().cloudMode() {
 					p = cloudRoot(a.config())

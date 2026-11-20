@@ -238,7 +238,11 @@ export function openDb(dataDir) {
   // and node:sqlite blocks the whole server meanwhile). The database cannot be corrupted this way; a power cut can
   // only lose the last moments of commits, leaving at worst a stored file nobody points to.
   raw.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+  // Reads from memory: a 32 MB page cache (the default is 2 MB) and the file mapped, so a busy tree and the activity
+  // log are not read from disk again and again; temporary sorts stay in memory.
+  raw.exec('PRAGMA cache_size = -32768; PRAGMA mmap_size = 268435456; PRAGMA temp_store = MEMORY;');
   raw.exec(SCHEMA);
+  raw.exec(`CREATE INDEX IF NOT EXISTS audit_alerts ON audit(id) WHERE action GLOB 'ALERT*'`);
   if (!raw.prepare(`SELECT 1 FROM pragma_table_info('audit') WHERE name = 'node_id'`).get()) raw.exec('ALTER TABLE audit ADD COLUMN node_id INTEGER');
   // Deleted accounts stay as tombstones so file history and the activity log keep their names.
   if (!raw.prepare(`SELECT 1 FROM pragma_table_info('users') WHERE name = 'deleted_at'`).get()) raw.exec('ALTER TABLE users ADD COLUMN deleted_at INTEGER');

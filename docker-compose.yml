@@ -89,6 +89,8 @@ services:
       OFFICE_INTERNAL_URL: http://company-files-office-tailscale:9980
       PDF_CONVERTER_URL: http://company-files-pdfconv:8090
       MAX_FILE_GB: "50" # resumable uploads: a cut-off upload continues, so very large files are practical
+      # Agent installers from a better-connected server (the NAS's internet upload is slow); empty = from here.
+      DOWNLOADS_URL: ${DOWNLOADS_URL:-}
     volumes:
       - data:/data
       - ${BACKUP_ROOT:?Set BACKUP_ROOT in .env}:/backup

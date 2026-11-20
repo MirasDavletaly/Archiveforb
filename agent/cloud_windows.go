@@ -393,11 +393,8 @@ func onFetchPlaceholders(info *cfCallbackInfo, params *cfCallbackParams) uintptr
 	}
 	runtime.KeepAlive(ids)
 	runtime.KeepAlive(names)
-	if id.ID != 0 {
-		c.noteDir(id.ID, dir)
-	} else {
-		c.noteDir(0, dir)
-	}
+	c.noteDir(id.ID, dir)
+	go c.reconcile(id.ID, dir) // what was here before (Windows skips those names) is merged with the website's items
 	return 0
 }
 
@@ -774,21 +771,13 @@ func (c *Cloud) sendUp(path string) {
 	}
 	api := c.s.api()
 	if st.IsDir() {
-		var it cloudItem
+		var it cloudItem // the website answers with its folder of that name if there is one: the two are merged
 		if err := api.call("POST", "/api/agent/cloud/"+strconv.FormatInt(parent, 10)+"/folders?name="+url.QueryEscape(st.Name()), nil, &it); err != nil {
 			log.Printf("files on demand: the website did not take folder %s: %v", path, err)
 			return
 		}
-		if err := convertToPlaceholder(path, it.identity().bytes(), true); err != nil {
-			log.Printf("files on demand: %s: %v", path, err)
-			return
-		}
-		c.noteDir(it.ID, path)
 		log.Printf("files on demand: new folder here, made on the website: %s", path)
-		entries, _ := os.ReadDir(path) // a whole folder copied in: what is inside goes too
-		for _, e := range entries {
-			c.sendUp(filepath.Join(path, e.Name()))
-		}
+		c.adopt(path, it) // a whole folder copied in: what is inside goes too
 		return
 	}
 	c.mu.Lock()
@@ -947,12 +936,14 @@ func (c *Cloud) reconcile(folder int64, dir string) {
 	}
 	byID := map[int64]here{}
 	names := map[string]bool{}
+	plain := map[string]string{} // ordinary items (not from the website): lower-case name -> name
 	for _, e := range entries {
 		name := windows.UTF16ToString(e.FileName[:])
 		names[strings.ToLower(name)] = true
 		ph, err := getPlaceholderInfo(filepath.Join(dir, name))
 		if err != nil {
-			continue // made here and not sent yet: the watcher takes care of it
+			plain[strings.ToLower(name)] = name // made here and not sent yet (the watcher sends it), or here from before
+			continue
 		}
 		if id, ok := parseIdentity(ph.Identity); ok {
 			byID[id.ID] = here{name, id, ph, e.FileAttributes}
@@ -964,7 +955,9 @@ func (c *Cloud) reconcile(folder int64, dir string) {
 		seen[it.ID] = true
 		h, ok := byID[it.ID]
 		if !ok {
-			if !names[strings.ToLower(it.Name)] {
+			if p, clash := plain[strings.ToLower(it.Name)]; clash {
+				c.merge(filepath.Join(dir, p), it)
+			} else if !names[strings.ToLower(it.Name)] {
 				create = append(create, it)
 			}
 			continue
@@ -1020,6 +1013,45 @@ func (c *Cloud) reconcile(folder int64, dir string) {
 		}
 		runtime.KeepAlive(ids)
 		runtime.KeepAlive(names)
+	}
+}
+
+// merge settles an ordinary item here that has the name of a website item, as when files on demand starts on a folder
+// that already has files (decided 2026-11-20 after a 1.2 copy of My files blocked the website's My files): a folder
+// becomes that website folder and its contents are merged the same way; a file that is the website's (same size and
+// time, as the earlier versions saved it) becomes its icon. Any other file is left to sendUp, which sends it as a new
+// version (the website keeps the one it had under Versions).
+func (c *Cloud) merge(path string, it cloudItem) {
+	st, err := os.Lstat(path)
+	if err != nil || ignoredName(filepath.Base(path)) || st.Mode()&os.ModeSymlink != 0 || st.IsDir() != it.Dir {
+		return
+	}
+	if it.Dir {
+		c.adopt(path, it)
+		return
+	}
+	if d := st.ModTime().UnixMilli() - it.Modified; st.Size() != it.Size || d <= -2000 || d >= 2000 {
+		return
+	}
+	if err := convertToPlaceholder(path, it.identity().bytes(), false); err != nil {
+		return // being sent right now: sendUp makes it the icon
+	}
+	log.Printf("files on demand: already here, the same as on the website: %s", path)
+	c.free(path)
+}
+
+// adopt makes an ordinary folder here the website folder it: the contents are merged (see merge), what only this
+// computer has goes up, and what only the website has appears as icons.
+func (c *Cloud) adopt(path string, it cloudItem) {
+	if err := convertToPlaceholder(path, it.identity().bytes(), true); err != nil {
+		log.Printf("files on demand: %s: %v", path, err)
+		return
+	}
+	c.noteDir(it.ID, path)
+	c.reconcile(it.ID, path)
+	entries, _ := os.ReadDir(path)
+	for _, e := range entries {
+		c.sendUp(filepath.Join(path, e.Name()))
 	}
 }
 

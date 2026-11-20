@@ -108,6 +108,7 @@ func installIfNeeded(string) bool {
 func uninstall(dir string) {
 	ipcSend(dir, ipcMsg{Quit: true})
 	if c := loadConfig(dir); c.Token != "" {
+		driveTeardown(c)
 		_ = newAPI(c.Server, c.Token).call("POST", "/api/agent/unpair", nil, nil)
 	}
 	_ = setAutostart(false)

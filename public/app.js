@@ -96,12 +96,17 @@ function folderGlyph() {
 }
 
 const fmtSize = n => (n < 1024 ? `${n} B` : n < 2 ** 20 ? `${Math.round(n / 1024)} KB` : n < 2 ** 30 ? `${+(n / 2 ** 20).toFixed(1)} MB` : `${+(n / 2 ** 30).toFixed(2)} GB`);
+// Made once: toLocaleString with options builds a new formatter on every call, which took seconds for a big folder.
+const F_TIME = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit' });
+const F_DAY = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short' });
+const F_DAY_YEAR = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+const F_FULL = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 function fmtDate(t) {
   const d = new Date(t), now = new Date();
-  if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', ...(d.getFullYear() !== now.getFullYear() && { year: 'numeric' }) });
+  if (d.toDateString() === now.toDateString()) return F_TIME.format(d);
+  return (d.getFullYear() !== now.getFullYear() ? F_DAY_YEAR : F_DAY).format(d);
 }
-const fmtDateTime = t => new Date(t).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+const fmtDateTime = t => F_FULL.format(new Date(t));
 // Your own personal folder is the only one you Manage there; someone else's shows by its name.
 const spaceLabel = s => (s.area === 'personal' && s.level === 3 ? 'My files' : s.root ? AREA[s.area].all : s.name);
 const copy = text => navigator.clipboard.writeText(text);
@@ -561,32 +566,47 @@ function fileTable(items, d, sel, onSel) {
     all.indeterminate = sel.size > 0 && sel.size < items.length;
     onSel();
   };
+  // Select all covers rows not drawn yet too: they start ticked from sel.
   const all = sel && h('input', { type: 'checkbox', 'aria-label': 'Select all', onChange: () => {
-    for (const [it, box] of boxes) {
-      box.checked = all.checked;
-      tick(it, box);
-    }
+    for (const it of items) all.checked ? sel.add(it.id) : sel.delete(it.id);
+    for (const [, box] of boxes) box.checked = all.checked;
+    onSel();
   } });
   const selCell = it => {
     if (!sel) return null;
-    const box = h('input', { type: 'checkbox', 'aria-label': `Select ${it.name}`, onChange: () => tick(it, box) });
+    const box = h('input', { type: 'checkbox', checked: sel.has(it.id), 'aria-label': `Select ${it.name}`, onChange: () => tick(it, box) });
     boxes.push([it, box]);
     return h('td', { class: 'c-sel' }, box);
   };
+  const row = it => h('tr', {},
+    selCell(it),
+    h('td', {}, it.dir
+      ? h('a', { class: 'item', href: `#/f/${it.id}` }, icon('folder', 'ico ico-folder'), h('span', {}, it.name), it.restricted ? [icon('lock', 'ico ico-lock'), h('span', { class: 'sr' }, '(restricted)')] : null)
+      : h('button', { type: 'button', class: 'item linkish', onClick: () => openFile(it) }, icon('file', 'ico ico-file'), h('span', {}, it.name))),
+    h('td', { class: 'num mono' }, it.dir ? '' : fmtSize(it.size)),
+    h('td', { class: 'c-date mono', title: fmtDateTime(it.updated_at) }, fmtDate(it.updated_at)),
+    h('td', { class: 'c-by muted' }, it.updated_by || ''),
+    h('td', { class: 'c-act' }, h('button', { type: 'button', class: 'icon-btn', 'aria-label': `Actions for ${it.name}`, 'aria-haspopup': 'menu', onClick: e => openMenu(e.currentTarget, itemActions(it, d)) }, icon('dots', 'ico ico-dots'))));
+  // A big folder opens at once: the first rows are drawn now and the rest as you scroll towards them, so rows nobody
+  // looks at are never drawn (5000 rows at once took about a second, mostly the browser laying out the table).
+  const FIRST = 200, SLICE = 300;
+  const tbody = h('tbody', {}, items.slice(0, FIRST).map(row));
+  let next = FIRST;
+  if (items.length > next) {
+    const io = new IntersectionObserver(es => {
+      if (!es.some(e => e.isIntersecting)) return;
+      io.disconnect();
+      tbody.append(...items.slice(next, (next += SLICE)).map(row));
+      if (next < items.length) io.observe(tbody.lastElementChild);
+    }, { rootMargin: '1500px 0px' });
+    io.observe(tbody.lastElementChild);
+  }
   return h('div', { class: 'table-wrap' }, h('table', { class: 'grid files' },
     h('thead', {}, h('tr', {},
       sel ? h('th', { scope: 'col', class: 'c-sel' }, all) : null,
       h('th', { scope: 'col' }, 'Name'), h('th', { scope: 'col', class: 'num' }, 'Size'), h('th', { scope: 'col', class: 'c-date' }, 'Modified'),
       h('th', { scope: 'col', class: 'c-by' }, 'By'), h('th', { scope: 'col', class: 'c-act' }, h('span', { class: 'sr' }, 'Actions')))),
-    h('tbody', {}, items.map(it => h('tr', {},
-      selCell(it),
-      h('td', {}, it.dir
-        ? h('a', { class: 'item', href: `#/f/${it.id}` }, icon('folder', 'ico ico-folder'), h('span', {}, it.name), it.restricted ? [icon('lock', 'ico ico-lock'), h('span', { class: 'sr' }, '(restricted)')] : null)
-        : h('button', { type: 'button', class: 'item linkish', onClick: () => openFile(it) }, icon('file', 'ico ico-file'), h('span', {}, it.name))),
-      h('td', { class: 'num mono' }, it.dir ? '' : fmtSize(it.size)),
-      h('td', { class: 'c-date mono', title: fmtDateTime(it.updated_at) }, fmtDate(it.updated_at)),
-      h('td', { class: 'c-by muted' }, it.updated_by || ''),
-      h('td', { class: 'c-act' }, h('button', { type: 'button', class: 'icon-btn', 'aria-label': `Actions for ${it.name}`, 'aria-haspopup': 'menu', onClick: e => openMenu(e.currentTarget, itemActions(it, d)) }, icon('dots', 'ico ico-dots'))))))));
+    tbody));
 }
 
 function itemActions(it, d) {

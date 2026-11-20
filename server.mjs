@@ -47,6 +47,7 @@ const STATIC = {
   '/fonts/plex-mono-400.woff2': 'node_modules/@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-400-normal.woff2',
   '/fonts/plex-mono-500.woff2': 'node_modules/@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-500-normal.woff2',
 };
+const VERSIONED = ['/app.js', '/app.css', '/theme.js']; // index.html links them as /x?v=<content tag>
 const TYPES = { '.txt': 'text/plain; charset=utf-8', '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.wasm': 'application/wasm' };
 // The PDF viewer (EmbedPDF 2.15.1, MIT, PDFium inside) is served from here; its versioned files never change.
 const VIEWER_DIR = 'public/vendor/embedpdf-2.15.1';
@@ -106,10 +107,20 @@ async function body(c, limit = 64 * 1024) {
   fail(400, 'Invalid JSON.');
 }
 
-function json(res, status, data) {
-  const b = JSON.stringify(data);
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(b), 'Cache-Control': 'no-store' });
-  res.end(b);
+// Big answers go compressed when the browser takes it: a folder with thousands of files is about 1 MB of JSON and
+// some 60 KB compressed, which matters over the internet. Small ones are not worth it.
+// ponytail: compressed on the main thread (a few ms for 1 MB at these fast settings); move to zlib's async calls if
+// listings ever get much bigger.
+const json = (res, status, data) => sendBody(res, status, 'application/json; charset=utf-8', Buffer.from(JSON.stringify(data)));
+function sendBody(res, status, type, b) {
+  const head = { 'Content-Type': type, 'Cache-Control': 'no-store', Vary: 'Accept-Encoding' };
+  const accepts = String(res.req?.headers['accept-encoding'] || '');
+  const enc = b.length < 2048 ? null : /\bbr\b/.test(accepts) ? 'br' : /\bgzip\b/.test(accepts) ? 'gzip' : null;
+  const out = enc === 'br' ? zlib.brotliCompressSync(b, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4, [zlib.constants.BROTLI_PARAM_SIZE_HINT]: b.length } })
+    : enc === 'gzip' ? zlib.gzipSync(b, { level: 5 }) : b;
+  if (enc) head['Content-Encoding'] = enc;
+  res.writeHead(status, { ...head, 'Content-Length': out.length });
+  res.end(out);
 }
 
 function loadSecret(file) {
@@ -251,13 +262,24 @@ export function createApp(cfg = loadConfig()) {
     system: !!n.system,
   });
 
-  // Current files, files in trash and their older versions all take disk space, so all count.
-  const usage = id =>
-    db.get(
+  // Current files, files in trash and their older versions all take disk space, so all count. Summing a big folder
+  // takes a while, so the total is kept until the database changes (any write here, or one by another process); an
+  // upload adds its own size instead (placeFile), so a burst of uploads does not sum the whole folder for each file.
+  const usageMemo = new Map(); // folder id -> { mark, used }
+  const changeMark = () => `${db.get('SELECT total_changes() AS t').t}:${db.get('PRAGMA data_version').data_version}`;
+  const usage = id => {
+    const mark = changeMark();
+    const m = usageMemo.get(id);
+    if (m?.mark === mark) return m.used;
+    const used = db.get(
       `${SUBTREE} SELECT COALESCE((SELECT SUM(n.size) FROM nodes n JOIN t ON n.id = t.id WHERE n.is_dir = 0), 0)
                     + COALESCE((SELECT SUM(v.size) FROM versions v JOIN t ON v.node_id = t.id), 0) AS used`,
       id,
     ).used;
+    if (usageMemo.size > 500) usageMemo.clear();
+    usageMemo.set(id, { mark, used });
+    return used;
+  };
 
   function checkQuota(chain, adding, skip = []) {
     for (const n of chain) {
@@ -553,8 +575,9 @@ export function createApp(cfg = loadConfig()) {
   // Shared with me: files and folders people gave me by name. Manage grants come from IT and live in the sidebar.
   add('GET', '/api/shared', 'user', c => {
     const out = [];
+    const res = acl.resolver(c.ctx);
     for (const { node_id } of db.all('SELECT node_id FROM acl WHERE user_id = ? AND level < ?', c.user.id, MANAGE)) {
-      const r = acl.resolve(c.ctx, node_id);
+      const r = res(node_id);
       if (!r?.level) continue;
       const { context, crumbs } = acl.crumbs(c.ctx, r);
       out.push({ ...view(r.node, r.level), location: [context, ...crumbs.slice(0, -1).map(x => x.name)].filter(Boolean).join(' / ') });
@@ -1035,7 +1058,7 @@ export function createApp(cfg = loadConfig()) {
 
   // Puts a fully received blob into folder r as `name`: a new file, or a new version of the file already there.
   function placeFile(c, r, name, blob, size) {
-    let made;
+    let made, before, above;
     try {
       made = db.tx(() => {
         // Access is checked again now: it may have changed while the file was streaming in.
@@ -1044,22 +1067,33 @@ export function createApp(cfg = loadConfig()) {
         const fresh = acl.resolve(ctx, r.node.id);
         if (u.disabled || (fresh?.level || 0) < EDIT) fail(403, 'You no longer have Edit access to this folder.');
         checkQuota(fresh.chain, size); // final word on quotas, also for uploads that took days
+        before = changeMark();
+        above = fresh.chain.map(n => n.id);
         const cur = taken(r.node.id, name);
         const now = Date.now();
         if (cur && (cur.is_dir || (acl.resolve(ctx, cur.id)?.level || 0) < EDIT)) fail(409, 'Something with this name already exists here.');
         let id;
+        // An empty file is not kept as a version (Finder and other programs make one first, then write into it).
+        const keep = cur && cur.size > 0;
         if (cur) {
-          db.run('INSERT INTO versions(node_id, blob, size, created_at, created_by) VALUES(?, ?, ?, ?, ?)', cur.id, cur.blob, cur.size, cur.updated_at, cur.updated_by);
+          if (keep) db.run('INSERT INTO versions(node_id, blob, size, created_at, created_by) VALUES(?, ?, ?, ?, ?)', cur.id, cur.blob, cur.size, cur.updated_at, cur.updated_by);
           db.run('UPDATE nodes SET blob = ?, size = ?, updated_at = ?, updated_by = ? WHERE id = ?', blob, size, now, c.user.id, cur.id);
           id = cur.id;
         } else id = db.run('INSERT INTO nodes(parent_id, name, is_dir, size, blob, created_at, updated_at, updated_by) VALUES(?, ?, 0, ?, ?, ?, ?, ?)', r.node.id, name, size, blob, now, now, c.user.id).lastInsertRowid;
-        audit(c, 'file', cur ? 'uploaded a new version' : 'uploaded', `${pathOf(r.chain)} / ${name}`, id); // one commit with the file
-        return { id, replaced: !!cur };
+        audit(c, 'file', keep ? 'uploaded a new version' : 'uploaded', `${pathOf(r.chain)} / ${name}`, id); // one commit with the file
+        return { id, replaced: keep, created: !cur, dropped: cur && !keep ? cur.blob : null };
       });
     } catch (e) {
       store.remove([blob]);
       throw e;
     }
+    // The totals of the folders above grow by exactly this file (a replaced version is kept and still counts).
+    const after = changeMark();
+    for (const id of above) {
+      const m = usageMemo.get(id);
+      if (m?.mark === before) usageMemo.set(id, { mark: after, used: m.used + size });
+    }
+    if (made.dropped) store.remove([made.dropped]);
     if (made.replaced) trimVersions(made.id);
     return made;
   }
@@ -1129,12 +1163,14 @@ export function createApp(cfg = loadConfig()) {
 
   add('GET', '/api/trash', 'user', c => {
     const rows = db.all(
-      'SELECT n.id, n.name, n.is_dir, n.size, n.deleted_at, u.name AS deleted_by FROM nodes n LEFT JOIN users u ON u.id = n.deleted_by WHERE n.deleted_at IS NOT NULL ORDER BY n.deleted_at DESC LIMIT 5000',
+      'SELECT n.id, n.parent_id, n.name, n.is_dir, n.size, n.deleted_at, u.name AS deleted_by FROM nodes n LEFT JOIN users u ON u.id = n.deleted_by WHERE n.deleted_at IS NOT NULL ORDER BY n.deleted_at DESC LIMIT 5000',
     );
     const out = [];
-    for (const row of rows) {
+    const res = acl.resolver(c.ctx);
+    for (const { parent_id, ...row } of rows) {
+      if ((res(parent_id)?.level || 0) < EDIT) continue; // restoring needs Edit on the folder it was in (cheap check first)
       // Only items the user could open before deletion: a hidden restricted folder must not surface here.
-      const r = acl.resolve(c.ctx, row.id, { trashed: true });
+      const r = res(row.id, { trashed: true });
       if (!r || !r.level || r.parentLevel < EDIT) continue;
       out.push({ ...row, dir: !!row.is_dir, location: pathOf(r.chain.slice(0, -1)), purge_at: row.deleted_at + TRASH_DAYS * DAY });
     }
@@ -1837,7 +1873,7 @@ export function createApp(cfg = loadConfig()) {
   }
 
   // The top level: the same places as the website's sidebar (My files, departments, projects, shared folders).
-  add('GET', '/api/agent/cloud', 'agent', c => {
+  function cloudTop(c) {
     const out = [], used = new Set();
     for (const s of acl.spaces(c.ctx)) {
       if (s.area === 'confidential') continue;
@@ -1847,7 +1883,8 @@ export function createApp(cfg = loadConfig()) {
       out.push({ ...cloudItem(db.get('SELECT * FROM nodes WHERE id = ?', s.id), s.level), name });
     }
     return out;
-  });
+  }
+  add('GET', '/api/agent/cloud', 'agent', cloudTop);
 
   add('GET', '/api/agent/cloud/:id', 'agent', c => {
     const r = cloudNode(c, c.params.id);
@@ -1922,6 +1959,295 @@ export function createApp(cfg = loadConfig()) {
     if (!r.node.is_dir && c.query.get('base') && contentVersion(r.node) !== c.query.get('base')) fail(409, 'It was changed on the website meanwhile.', 'changed');
     trashNode(c, r.node.id);
   });
+
+  // ---- Network drive for Macs (WebDAV), decided 2026-11-20 ----
+  // Finder mounts the same tree as files on demand (the sidebar's places, no confidential folders) and fetches a file
+  // when it is opened: as close to OneDrive as a Mac allows without Apple's paid signing. The password is a paired
+  // computer's agent token (Basic auth; the site is HTTPS only), and every website rule applies (Read stays read
+  // only, deletions go to the trash, downloads are metered and logged). Names starting with a dot (Finder's
+  // .DS_Store and ._ files, programs' temporary files) are kept in memory per computer, never among the company's
+  // files; a temporary file renamed onto a real one (a program saving) becomes a new version of it.
+  const DAV_ROOT = ['dav', cfg.appName]; // mounted as https://<site>/dav/<app name>; the volume takes that name
+  const davMem = new Map(); // `${device id}\n${path in lower case}` -> { name, dir, buf, at }
+  let davMemBytes = 0;
+  const xmlEsc = s => String(s).replace(/[<>&'"]/g, ch => `&#${ch.charCodeAt(0)};`);
+  const davHref = (segs, dir) => '/' + [...DAV_ROOT, ...segs].map(encodeURIComponent).join('/') + (dir ? '/' : '');
+  const davKey = (c, segs) => `${c.device.id}\n${segs.join('/').toLowerCase()}`;
+  const inMemory = segs => segs.some(s => s.startsWith('.'));
+  function davPath(pathname) { // the path below the drive's root, or null when outside it
+    const segs = pathname.split('/').filter(Boolean).map(s => decodeURIComponent(s).normalize('NFC'));
+    return segs[0] === DAV_ROOT[0] && segs[1] === DAV_ROOT[1] ? segs.slice(2) : null;
+  }
+  function davAuth(c) {
+    const m = /^Basic ([A-Za-z0-9+/=]+)$/.exec(c.req.headers.authorization || '');
+    const token = m ? Buffer.from(m[1], 'base64').toString().split(':').slice(1).join(':') : '';
+    try {
+      Object.assign(c, agentAuth({ headers: { authorization: `Bearer ${token}` } }));
+    } catch (e) {
+      c.res.setHeader('WWW-Authenticate', `Basic realm="${cfg.appName}", charset="UTF-8"`);
+      throw e;
+    }
+  }
+  // { top } for the drive's root, the resolved item, or null when it is not there for this person.
+  function davFind(c, segs) {
+    if (!segs.length) return { top: true };
+    const t = cloudTop(c).find(x => x.name.toLowerCase() === segs[0].toLowerCase());
+    let r = t && acl.resolve(c.ctx, t.id);
+    for (const s of segs.slice(1)) {
+      if (!r?.level || !r.node.is_dir) return null;
+      const n = taken(r.node.id, s);
+      r = n && acl.resolve(c.ctx, n.id);
+    }
+    return r?.level && r.area !== 'confidential' ? r : null;
+  }
+  // The folder a new item goes into: an existing folder below the root, where this person may edit.
+  function davParent(c, segs) {
+    const p = davFind(c, segs.slice(0, -1));
+    if (!p) fail(409, 'The folder it should go into does not exist.');
+    if (p.top) fail(403, 'The top level holds the sections; put files inside one of them.');
+    if (!p.node.is_dir) fail(409, 'That is not a folder.');
+    if (p.level < EDIT) fail(403, 'You can only view this folder.');
+    return p;
+  }
+  let davFreeAt = 0, davFreeBytes = 0;
+  async function davFree() {
+    if (Date.now() - davFreeAt > 60e3) {
+      const s = await fs.promises.statfs(cfg.dataDir);
+      [davFreeAt, davFreeBytes] = [Date.now(), Math.max(0, s.bavail * s.bsize - cfg.minFree)];
+    }
+    return davFreeBytes;
+  }
+  function davEntry(href, it, free) {
+    return `<D:response><D:href>${xmlEsc(href)}</D:href><D:propstat><D:prop><D:displayname>${xmlEsc(it.name)}</D:displayname>` +
+      (it.dir
+        ? `<D:resourcetype><D:collection/></D:resourcetype><D:quota-available-bytes>${free}</D:quota-available-bytes><D:quota-used-bytes>0</D:quota-used-bytes>`
+        : `<D:resourcetype/><D:getcontentlength>${it.size}</D:getcontentlength><D:getcontenttype>${PREVIEW[ext(it.name)] || 'application/octet-stream'}</D:getcontenttype><D:getetag>"${it.v || it.modified}"</D:getetag>`) +
+      `<D:getlastmodified>${new Date(it.modified).toUTCString()}</D:getlastmodified><D:creationdate>${new Date(it.created).toISOString()}</D:creationdate>` +
+      '<D:supportedlock><D:lockentry><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock>' +
+      '</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>';
+  }
+  const memItem = m => ({ name: m.name, dir: m.dir, size: m.buf?.length || 0, modified: m.at, created: m.at });
+  const davXml = (c, status, xml) => sendBody(c.res, status, 'application/xml; charset=utf-8', Buffer.from(`<?xml version="1.0" encoding="utf-8"?>\n${xml}`));
+  async function readSmall(req, max) {
+    const chunks = [];
+    let n = 0;
+    for await (const ch of req) {
+      if ((n += ch.length) > max) fail(413, 'Too large for a temporary file.');
+      chunks.push(ch);
+    }
+    return Buffer.concat(chunks);
+  }
+  function memPut(key, entry) {
+    const old = davMem.get(key);
+    davMemBytes += (entry.buf?.length || 0) - (old?.buf?.length || 0);
+    davMem.delete(key);
+    davMem.set(key, entry);
+    for (const [k, v] of davMem) { // oldest first, while over 128 MB in all
+      if (davMemBytes <= 128 * 2 ** 20) break;
+      davMemBytes -= v.buf?.length || 0;
+      davMem.delete(k);
+    }
+  }
+  function memDrop(key) {
+    davMemBytes -= davMem.get(key)?.buf?.length || 0;
+    davMem.delete(key);
+  }
+  // Received content as a stored file: the body of this request, or a temporary file kept in memory.
+  async function davReceive(c, chain, from) {
+    if (from) return { blob: await store.receive(Readable.from([from.buf]), from.buf.length), size: from.buf.length };
+    const len = c.req.headers['content-length'];
+    if (len != null) {
+      const size = Number(len);
+      if (!Number.isSafeInteger(size) || size < 0) fail(400, 'Invalid size.');
+      if (size > cfg.maxFile) fail(413, `Files larger than ${fmtBytes(cfg.maxFile)} cannot be uploaded.`);
+      return { blob: await receiveBlob(c, chain, size), size };
+    }
+    // Chunked: Finder sends big files without a length (X-Expected-Entity-Length says what is coming).
+    const hint = Number(c.req.headers['x-expected-entity-length']);
+    if (Number.isSafeInteger(hint)) {
+      if (hint > cfg.maxFile) fail(413, `Files larger than ${fmtBytes(cfg.maxFile)} cannot be uploaded.`);
+      checkQuota(chain, hint);
+    }
+    await checkDisk();
+    const blob = await store.receive(c.req, null, cfg.maxFile);
+    return { blob, size: (await fs.promises.stat(store.file(blob))).size };
+  }
+
+  async function dav(c, url) {
+    const m = c.req.method;
+    if (m === 'OPTIONS') {
+      c.res.writeHead(200, { DAV: '1, 2', 'MS-Author-Via': 'DAV', Allow: 'OPTIONS, PROPFIND, PROPPATCH, GET, HEAD, PUT, DELETE, MKCOL, MOVE, COPY, LOCK, UNLOCK', 'Content-Length': 0 });
+      return c.res.end();
+    }
+    davAuth(c);
+    const segs = davPath(url.pathname);
+    if (!segs) fail(404, 'Not found.');
+    if (m !== 'PUT') c.req.resume(); // request bodies other than files are not needed (PROPFIND asks for the usual set)
+    const mem = inMemory(segs);
+    const key = davKey(c, segs);
+    const label = `on computer "${c.device.name}" (network drive)`;
+
+    if (m === 'PROPFIND') {
+      const free = await davFree();
+      const depth = c.req.headers.depth === '0' ? 0 : 1; // "infinity" is answered one level deep
+      let self, kids = [];
+      if (mem) {
+        const e = davMem.get(key);
+        if (!e) fail(404, 'Not found.');
+        self = memItem(e);
+      } else {
+        const r = davFind(c, segs);
+        if (!r) fail(404, 'Not found.');
+        self = r.top ? { name: cfg.appName, dir: true, modified: Date.now(), created: Date.now() } : { ...cloudItem(r.node, r.level), name: segs.at(-1) };
+        if (depth && self.dir) kids = r.top ? cloudTop(c) : acl.children(c.ctx, r).map(n => cloudItem(n, n.level));
+      }
+      const out = [davEntry(davHref(segs, self.dir), self, free), ...kids.map(k => davEntry(davHref([...segs, k.name], k.dir), k, free))];
+      if (depth && self.dir) { // temporary files kept in memory for this folder
+        const prefix = davKey(c, segs) + (segs.length ? '/' : '');
+        for (const [k, e] of davMem) if (k.startsWith(prefix) && !k.slice(prefix.length).includes('/')) out.push(davEntry(davHref([...segs, e.name], e.dir), memItem(e), free));
+      }
+      return davXml(c, 207, `<D:multistatus xmlns:D="DAV:">${out.join('')}</D:multistatus>`);
+    }
+
+    if (m === 'GET' || m === 'HEAD') {
+      if (mem) {
+        const e = davMem.get(key);
+        if (!e || e.dir) fail(404, 'Not found.');
+        c.res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': e.buf.length });
+        return c.res.end(m === 'HEAD' ? undefined : e.buf);
+      }
+      const r = davFind(c, segs);
+      if (!r) fail(404, 'Not found.');
+      if (r.top || r.node.is_dir) {
+        c.res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return c.res.end(m === 'HEAD' ? undefined : `${cfg.appName} network drive: connect it from the Company Files program.\n`);
+      }
+      return sendFile(c, r.node.blob, r.node.size, r.node.name, false, `user ${c.user.login}`, () => audit(c, 'file', `opened ${label}`, pathOf(r.chain), r.node.id));
+    }
+
+    if (m === 'PUT') {
+      if (!segs.length) fail(405, 'Not a file.');
+      if (mem) {
+        if (davMem.get(key)?.dir) fail(405, 'That is a folder.');
+        memPut(key, { name: segs.at(-1), dir: false, buf: await readSmall(c.req, 64 * 2 ** 20), at: Date.now() });
+        c.res.writeHead(201, { 'Content-Length': 0 });
+        return c.res.end();
+      }
+      const p = davParent(c, segs);
+      const name = cleanName(segs.at(-1));
+      checkPathLength(p.chain, name);
+      const before = taken(p.node.id, name);
+      if (before?.is_dir && acl.resolve(c.ctx, before.id)?.level) fail(405, 'A folder with this name already exists here.');
+      const { blob, size } = await davReceive(c, p.chain);
+      const made = placeFile(c, p, name, blob, size);
+      c.res.writeHead(made.created ? 201 : 204, { 'Content-Length': 0 });
+      return c.res.end();
+    }
+
+    if (m === 'MKCOL') {
+      if (!segs.length) fail(405, 'It exists.');
+      if (mem) {
+        if (davMem.has(key)) fail(405, 'It exists.');
+        memPut(key, { name: segs.at(-1), dir: true, buf: null, at: Date.now() });
+      } else {
+        const p = davParent(c, segs);
+        const name = cleanName(segs.at(-1));
+        if (taken(p.node.id, name)) fail(405, 'Something with this name already exists here.');
+        checkPathLength(p.chain, name);
+        const now = Date.now();
+        const id = unique(() => db.run('INSERT INTO nodes(parent_id, name, is_dir, created_at, updated_at, updated_by) VALUES(?, ?, 1, ?, ?, ?)', p.node.id, name, now, now, c.user.id).lastInsertRowid);
+        audit(c, 'file', `created folder ${label}`, `${pathOf(p.chain)} / ${name}`, id);
+      }
+      c.res.writeHead(201, { 'Content-Length': 0 });
+      return c.res.end();
+    }
+
+    if (m === 'DELETE') {
+      if (mem) {
+        if (!davMem.has(key)) fail(404, 'Not found.');
+        for (const k of [...davMem.keys()]) if (k === key || k.startsWith(key + '/')) memDrop(k);
+      } else {
+        const r = davFind(c, segs);
+        if (!r) fail(404, 'Not found.');
+        if (r.top || segs.length < 2) fail(403, 'The places at the top level cannot be deleted.');
+        trashNode(c, r.node.id);
+      }
+      c.res.writeHead(204);
+      return c.res.end();
+    }
+
+    if (m === 'MOVE' || m === 'COPY') {
+      const dest = davPath(new URL(String(c.req.headers.destination || ''), 'http://x').pathname);
+      if (!dest?.length || !segs.length) fail(403, 'Choose another place.');
+      const overwrite = String(c.req.headers.overwrite || 'T').toUpperCase() !== 'F';
+      const destKey = davKey(c, dest);
+      if (mem) {
+        const e = davMem.get(key);
+        if (!e) fail(404, 'Not found.');
+        if (inMemory(dest)) { // temporary file renamed to another temporary name
+          if (davMem.has(destKey) && !overwrite) fail(412, 'It exists.');
+          if (m === 'MOVE') memDrop(key);
+          memPut(destKey, { ...e, name: dest.at(-1), at: Date.now() });
+          c.res.writeHead(201, { 'Content-Length': 0 });
+          return c.res.end();
+        }
+        // a program saving: its temporary file becomes the real one (a new version when that exists)
+        if (e.dir) fail(403, 'Folders cannot be moved here this way.');
+        const p = davParent(c, dest);
+        const name = cleanName(dest.at(-1));
+        const before = taken(p.node.id, name);
+        if (before && !overwrite) fail(412, 'Something with this name already exists here.');
+        if (before?.is_dir) fail(403, 'A folder with this name already exists here.');
+        const { blob, size } = await davReceive(c, p.chain, e);
+        const made = placeFile(c, p, name, blob, size);
+        if (m === 'MOVE') memDrop(key);
+        c.res.writeHead(made.created ? 201 : 204, { 'Content-Length': 0 });
+        return c.res.end();
+      }
+      if (inMemory(dest)) fail(403, 'Files cannot be given names starting with a dot here.'); // never take real files into memory
+      const r = davFind(c, segs);
+      if (!r) fail(404, 'Not found.');
+      if (r.top || segs.length < 2) fail(403, 'The places at the top level cannot be moved.');
+      const p = davParent(c, dest);
+      const name = cleanName(dest.at(-1));
+      const before = taken(p.node.id, name);
+      const replacing = before && before.id !== r.node.id;
+      if (replacing && !overwrite) fail(412, 'Something with this name already exists here.');
+      if (replacing && !before.is_dir && !r.node.is_dir) {
+        // A file put over a file: a new version of it, so its history stays (the moved one goes to the trash).
+        const tmp = path.join(cfg.dataDir, 'tmp', crypto.randomBytes(16).toString('hex'));
+        await fs.promises.copyFile(store.file(r.node.blob), tmp);
+        placeFile(c, p, name, await store.adopt(tmp), r.node.size);
+        if (m === 'MOVE') trashNode(c, r.node.id);
+        c.res.writeHead(204);
+        return c.res.end();
+      }
+      if (replacing) trashNode(c, before.id);
+      if (m === 'MOVE') moveNode(c, r.node.id, { name, parent_id: p.node.id });
+      else {
+        if (r.node.is_dir) fail(403, 'Copy folders on the website.');
+        const tmp = path.join(cfg.dataDir, 'tmp', crypto.randomBytes(16).toString('hex'));
+        await fs.promises.copyFile(store.file(r.node.blob), tmp);
+        placeFile(c, p, name, await store.adopt(tmp), r.node.size);
+      }
+      c.res.writeHead(replacing ? 204 : 201, { 'Content-Length': 0 });
+      return c.res.end();
+    }
+
+    if (m === 'LOCK') { // Finder writes only to drives that lock; nothing else here relies on locks
+      const token = `opaquelocktoken:${crypto.randomUUID()}`;
+      c.res.setHeader('Lock-Token', `<${token}>`);
+      return davXml(c, 200, `<D:prop xmlns:D="DAV:"><D:lockdiscovery><D:activelock><D:locktype><D:write/></D:locktype><D:lockscope><D:exclusive/></D:lockscope><D:depth>0</D:depth><D:owner>${xmlEsc(c.device.name)}</D:owner><D:timeout>Second-3600</D:timeout><D:locktoken><D:href>${token}</D:href></D:locktoken><D:lockroot><D:href>${xmlEsc(davHref(segs))}</D:href></D:lockroot></D:activelock></D:lockdiscovery></D:prop>`);
+    }
+    if (m === 'UNLOCK') {
+      c.res.writeHead(204);
+      return c.res.end();
+    }
+    if (m === 'PROPPATCH') { // Finder stores its own properties; they are not kept
+      return davXml(c, 207, `<D:multistatus xmlns:D="DAV:"><D:response><D:href>${xmlEsc(davHref(segs))}</D:href><D:propstat><D:prop/><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>`);
+    }
+    fail(405, 'Not supported.');
+  }
 
   // "A/B/name" below My files: creates the folders that are missing (names fitted) and returns the last folder's id
   // and the fitted name. With dir, all of it is folders.
@@ -2067,8 +2393,26 @@ export function createApp(cfg = loadConfig()) {
     if (q.length < 2) return [];
     const like = '%' + q.replace(/[\\%_]/g, m => '\\' + m) + '%';
     const out = [];
-    for (const { id } of db.all("SELECT id FROM nodes WHERE name LIKE ? ESCAPE '\\' AND deleted_at IS NULL AND parent_id IS NOT NULL ORDER BY updated_at DESC LIMIT 2000", like)) {
-      const r = acl.resolve(c.ctx, id);
+    const res = acl.resolver(c.ctx);
+    // Someone with a whole section (Managers) sees most of the tree: one pass over all names is quickest. Everyone
+    // else searches only below the folders and files granted to them (everything they can open is there; UNION also
+    // ends a parent/child cycle), instead of sifting the whole company's names. resolve() has the last word.
+    const groups = JSON.stringify([...c.ctx.groups]);
+    const wide = db.get('SELECT 1 FROM acl a JOIN nodes n ON n.id = a.node_id WHERE n.parent_id IS NULL AND (a.user_id = ? OR a.group_id IN (SELECT value FROM json_each(?))) LIMIT 1', c.ctx.uid, groups);
+    const match = "n.name LIKE ? ESCAPE '\\' AND n.deleted_at IS NULL AND n.parent_id IS NOT NULL ORDER BY n.updated_at DESC LIMIT 2000";
+    const hits = wide
+      ? db.all(`SELECT n.id FROM nodes n WHERE ${match}`, like)
+      : db.all(
+          `WITH RECURSIVE t(id) AS (
+             SELECT node_id FROM acl WHERE user_id = ? OR group_id IN (SELECT value FROM json_each(?))
+             UNION SELECT n.id FROM nodes n JOIN t ON n.parent_id = t.id WHERE n.deleted_at IS NULL)
+           SELECT n.id FROM nodes n JOIN t ON n.id = t.id WHERE ${match}`,
+          c.ctx.uid,
+          groups,
+          like,
+        );
+    for (const { id } of hits) {
+      const r = res(id);
       if (!r?.level) continue;
       out.push({ ...view(r.node, r.level), location: acl.crumbs(c.ctx, r).crumbs.slice(0, -1).map(x => x.name).join(' / '), parent_id: r.node.parent_id });
       if (out.length >= 100) break;
@@ -2568,23 +2912,24 @@ export function createApp(cfg = loadConfig()) {
     const alerts = want === 'alerts';
     const list = want && !alerts ? cats.filter(x => x === want) : cats;
     const before = Number(c.query.get('before')) || Number.MAX_SAFE_INTEGER;
+    // Alerts are rare among many rows: their own partial index (audit_alerts, same GLOB term) finds them directly.
     const rows = db.all(
       `SELECT a.id, a.ts, a.cat, a.action, a.target, a.ip, a.node_id, u.name AS actor, u.login AS actor_login
        FROM audit a LEFT JOIN users u ON u.id = a.actor
-       WHERE a.id < ? AND a.cat IN (SELECT value FROM json_each(?)) AND (? = 0 OR a.action LIKE 'ALERT%')
+       WHERE a.id < ? AND a.cat IN (SELECT value FROM json_each(?))${alerts ? " AND a.action GLOB 'ALERT*'" : ''}
        ORDER BY a.id DESC LIMIT 200`,
       before,
       JSON.stringify(list),
-      alerts ? 1 : 0,
     );
     const out = [];
+    const res = acl.resolver(c.user.is_admin ? acl.NOBODY : c.ctx);
     for (const { node_id, ...row } of rows) {
       if (node_id != null) {
         if (c.user.is_admin) {
           // IT sees where access changed, never the names people gave their own folders and files.
-          const x = acl.resolve(acl.NOBODY, node_id, { trashed: true });
+          const x = res(node_id, { trashed: true });
           if (!x?.node.system) row.target = x ? `${pathOf(x.chain.slice(0, x.chain.findLastIndex(n => n.system) + 1))} / …` : '(deleted item)';
-        } else if (!acl.resolve(c.ctx, node_id, { trashed: true })?.level) continue; // rows about files this Manager cannot open
+        } else if (!res(node_id, { trashed: true })?.level) continue; // rows about files this Manager cannot open
       }
       out.push(row);
     }
@@ -2594,11 +2939,40 @@ export function createApp(cfg = loadConfig()) {
   // =====================================================================
   // HTTP plumbing
   // =====================================================================
+  const etag = buf => `"${crypto.createHash('sha1').update(buf).digest('base64url').slice(0, 16)}"`;
+  function staticFile(key) {
+    if (!staticCache.has(key)) {
+      let buf = null;
+      try {
+        buf = fs.readFileSync(path.join(ROOT, key));
+      } catch {}
+      staticCache.set(key, buf && { buf, tag: etag(buf) });
+    }
+    return staticCache.get(key);
+  }
+  const version = a => staticFile(STATIC[a]).tag.slice(1, -1);
+  // index.html with its scripts and styles linked by version, in each encoding (made once).
+  function startPage() {
+    if (!staticCache.has('#page')) {
+      let html = staticFile(STATIC['/']).buf.toString();
+      for (const a of VERSIONED) html = html.replace(`"${a}"`, `"${a}?v=${version(a)}"`);
+      const buf = Buffer.from(html), tag = etag(buf);
+      staticCache.set('#page', { '': { buf, tag }, br: { buf: zlib.brotliCompressSync(buf), tag: tag.replace(/"$/, '-br"') }, gzip: { buf: zlib.gzipSync(buf), tag: tag.replace(/"$/, '-gz"') } });
+    }
+    return staticCache.get('#page');
+  }
+
   function serveStatic(req, res, p) {
     const dl = /^\/downloads\/([\w.-]+)$/.exec(p)?.[1];
     if (dl && !dl.startsWith('.')) {
       const file = path.join(ROOT, 'downloads', dl);
       const st = fs.statSync(file, { throwIfNoEntry: false });
+      // Installers come from the download server when one is set; ?v= changes with each build, so no cache serves
+      // an old one. The copy there is uploaded with every release.
+      if (st?.isFile() && cfg.downloadsUrl && Object.values(DOWNLOADS).includes(dl)) {
+        res.writeHead(302, { Location: `${cfg.downloadsUrl}/${dl}?v=${st.size}-${Math.floor(st.mtimeMs)}`, 'Cache-Control': 'no-cache' });
+        return res.end();
+      }
       if (st?.isFile()) {
         res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': st.size, 'Content-Disposition': `attachment; filename="${dl}"`, 'Cache-Control': 'no-cache' });
         if (req.method === 'HEAD') return res.end();
@@ -2616,23 +2990,16 @@ export function createApp(cfg = loadConfig()) {
     // Brotli or gzip copies made when the image was built (scripts/precompress.mjs), if the browser takes them.
     const accepts = String(req.headers['accept-encoding'] || '');
     const enc = /\bbr\b(?!;q=0(\.0*)?\b)/.test(accepts) ? 'br' : /\bgzip\b(?!;q=0(\.0*)?\b)/.test(accepts) ? 'gzip' : null;
-    const load = suffix => {
-      const key = rel + suffix;
-      if (!staticCache.has(key)) {
-        let buf = null;
-        try {
-          buf = fs.readFileSync(path.join(ROOT, key));
-        } catch {}
-        const tag = buf && `"${crypto.createHash('sha1').update(buf).digest('base64url').slice(0, 16)}"`;
-        staticCache.set(key, buf && { buf, tag });
-      }
-      return staticCache.get(key);
-    };
-    const packed = enc && load(enc === 'br' ? '.br' : '.gz');
-    const file = packed || load('');
+    const load = suffix => staticFile(rel + suffix);
+    // The page asks for its scripts and styles by version (?v=), so those never need checking again: a repeat visit
+    // downloads nothing but the page itself, instead of asking about each file.
+    const page = rel === STATIC['/'] && startPage();
+    const packed = enc && (page ? page[enc] : load(enc === 'br' ? '.br' : '.gz'));
+    const file = packed || (page ? page[''] : load(''));
+    const pinned = VERSIONED.includes(p) && new URL(req.url, 'http://x').searchParams.get('v') === version(p);
     const headers = {
       'Content-Type': TYPES[path.extname(rel)],
-      'Cache-Control': rel.endsWith('.woff2') || rel.startsWith('public/vendor/') ? 'public, max-age=31536000, immutable' : 'no-cache',
+      'Cache-Control': pinned || rel.endsWith('.woff2') || rel.startsWith('public/vendor/') ? 'public, max-age=31536000, immutable' : 'no-cache',
       ETag: file.tag,
       Vary: 'Accept-Encoding',
     };
@@ -2674,6 +3041,8 @@ export function createApp(cfg = loadConfig()) {
       if (!cfg.allowedHosts.includes(String(req.headers.host || '').toLowerCase())) fail(421, 'Unknown host. Open the storage by its address.');
       url = new URL(req.url, 'http://localhost');
       c.query = url.searchParams;
+      // The network drive: its own methods and Basic auth with a computer's token (no cookies, so no CSRF).
+      if (url.pathname === '/dav' || url.pathname.startsWith('/dav/')) return await dav(c, url);
       if ((req.method === 'GET' || req.method === 'HEAD') && !url.pathname.startsWith('/api/')) return serveStatic(req, res, url.pathname);
       let route, m;
       for (route of routes) if (route.method === req.method && (m = route.re.exec(url.pathname))) break;

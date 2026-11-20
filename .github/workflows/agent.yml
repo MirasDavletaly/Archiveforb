@@ -61,6 +61,9 @@ jobs:
       - name: Two-way My files sync
         run: node --disable-warning=ExperimentalWarning agent/test/sync-e2e.mjs
         env: { AGENT: '${{ github.workspace }}/agent/build/agent-test', APP_URL: 'file://${{ github.workspace }}/', WORK: '${{ runner.temp }}' }
+      - name: Network drive (Finder's WebDAV client)
+        run: node --disable-warning=ExperimentalWarning agent/test/drive-e2e.mjs
+        env: { AGENT: '${{ github.workspace }}/agent/build/agent-test', APP_URL: 'file://${{ github.workspace }}/', WORK: '${{ runner.temp }}' }
 
   # Files on demand on a clean Windows machine (the Cloud Files API, as OneDrive uses it), and the folder mode.
   windows-test:

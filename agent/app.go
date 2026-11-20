@@ -208,9 +208,12 @@ func (a *App) handleLink(link string) {
 	switch {
 	case err == nil:
 		c := a.config()
-		if c.cloudMode() {
+		switch {
+		case c.cloudMode():
 			message(c.name(), fmt.Sprintf("This computer is connected as %s.\n\n%s is now in File Explorer, on the left (like OneDrive): everything you can open on the website, downloaded when you open it. Folder: %s", c.User, c.name(), cloudRoot(c)))
-		} else {
+		case c.driveMode():
+			message(c.name(), fmt.Sprintf("This computer is connected as %s.\n\n%s is now in Finder, on the left (under Locations, and in Favorites): everything you can open on the website, downloaded when you open it.", c.User, c.name()))
+		default:
 			message(c.name(), fmt.Sprintf("This computer is connected as %s.\n\nSelect files on the website and press Enter: they are saved to\n%s", c.User, c.folder()))
 		}
 	case errors.Is(err, errCancelled):
@@ -236,6 +239,7 @@ func (a *App) disconnect() {
 // endCloud: this computer stopped syncing; the cloud folder becomes an ordinary folder (downloaded files stay).
 func (a *App) endCloud() {
 	c := a.config()
+	driveTeardown(c) // Mac: the network drive is disconnected
 	if c.CloudRegistered == "" {
 		return
 	}

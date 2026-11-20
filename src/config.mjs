@@ -28,6 +28,9 @@ export function loadConfig(env = process.env) {
     tlsKey: env.TLS_KEY || null,
     trustProxy: env.TRUST_PROXY === '1',
     appName: env.APP_NAME || 'Company Files',
+    // Where the agent installers are downloaded from instead of this server (a better-connected one: the NAS's
+    // internet upload is slow). /downloads/<installer> then redirects there. Unset: served from here.
+    downloadsUrl: env.DOWNLOADS_URL ? new URL(env.DOWNLOADS_URL).href.replace(/\/+$/, '') : null,
     maxFile: gb(env.MAX_FILE_GB, 10),
     personalQuota: gb(env.PERSONAL_QUOTA_GB, 20),
     backupDir: env.BACKUP_DIR ? path.resolve(ROOT, env.BACKUP_DIR) : null,

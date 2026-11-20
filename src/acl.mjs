@@ -56,16 +56,10 @@ export function makeAcl(db) {
 
   // trashed: the item itself may be in the trash. anyDeleted: ignore the trash entirely (used by guards that
   // must count restricted folders hidden inside a trashed folder too).
-  function resolve(ctx, id, { trashed = false, anyDeleted = false } = {}) {
-    if (!Number.isSafeInteger(id) || id <= 0) return null;
-    const chain = db.all(CHAIN, id);
-    if (!chain.length || chain.at(-1).id !== id || chain[0].parent_id != null) return null; // cut off by the depth cap
+  function finish(ctx, chain, infos, { trashed = false, anyDeleted = false } = {}) {
     const node = chain.at(-1);
     if (!anyDeleted && (chain.slice(0, -1).some(n => n.deleted_at) || (!trashed && node.deleted_at))) return null;
-    const ent = entries(chain.map(n => n.id));
-    const infos = [];
-    let info = ZERO;
-    for (const n of chain) infos.push((info = step(ctx, info, n, ent.get(n.id))));
+    const info = infos.at(-1);
     return {
       node,
       chain,
@@ -73,6 +67,41 @@ export function makeAcl(db) {
       area: info.area,
       level: levelOf(ctx, info),
       parentLevel: chain.length > 1 ? levelOf(ctx, infos.at(-2)) : 0,
+    };
+  }
+
+  function resolve(ctx, id, opts) {
+    if (!Number.isSafeInteger(id) || id <= 0) return null;
+    const chain = db.all(CHAIN, id);
+    if (!chain.length || chain.at(-1).id !== id || chain[0].parent_id != null) return null; // cut off by the depth cap
+    const ent = entries(chain.map(n => n.id));
+    const infos = [];
+    let info = ZERO;
+    for (const n of chain) infos.push((info = step(ctx, info, n, ent.get(n.id))));
+    return finish(ctx, chain, infos, opts);
+  }
+
+  // resolve() for listings that look up many items (search, trash, the activity log): every folder above is read
+  // once and remembered, instead of once per item below it. Only for read-only requests: it does not see changes
+  // made after a folder was read.
+  function resolver(ctx) {
+    const memo = new Map(); // id -> { chain, infos }, or null for "not in the tree"
+    const walk = (id, depth = 0) => {
+      if (memo.has(id)) return memo.get(id);
+      memo.set(id, null); // a parent/child cycle ends here
+      const node = depth < 500 && db.get('SELECT * FROM nodes WHERE id = ?', id);
+      const up = node && (node.parent_id == null ? { chain: [], infos: [] } : walk(node.parent_id, depth + 1));
+      const out = up && {
+        chain: [...up.chain, node],
+        infos: [...up.infos, step(ctx, up.infos.at(-1) ?? ZERO, node, db.all('SELECT node_id, user_id, group_id, level FROM acl WHERE node_id = ?', id))],
+      };
+      memo.set(id, out || null);
+      return out;
+    };
+    return (id, opts) => {
+      if (!Number.isSafeInteger(id) || id <= 0) return null;
+      const w = walk(id);
+      return w && finish(ctx, w.chain, w.infos, opts);
     };
   }
 
@@ -108,8 +137,9 @@ export function makeAcl(db) {
       .all('SELECT DISTINCT node_id FROM acl WHERE user_id = ? OR group_id IN (SELECT value FROM json_each(?))', ctx.uid, JSON.stringify([...ctx.groups]))
       .map(r => r.node_id);
     const out = [];
+    const res = resolver(ctx);
     for (const id of ids) {
-      const r = resolve(ctx, id);
+      const r = res(id);
       if (!r || !r.level || !r.node.is_dir || r.parentLevel) continue;
       out.push({
         id,
@@ -160,5 +190,5 @@ export function makeAcl(db) {
     return { own: at(r.node.id).map(fmt), inherited, restricted: !r.node.inherit };
   }
 
-  return { ctxFor, NOBODY, levelOf, resolve, children, crumbs, spaces, sensitive, accessView };
+  return { ctxFor, NOBODY, levelOf, resolve, resolver, children, crumbs, spaces, sensitive, accessView };
 }

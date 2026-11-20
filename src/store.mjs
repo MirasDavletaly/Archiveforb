@@ -19,24 +19,25 @@ export function makeStore(dataDir, stallMs = 60e3) {
     file,
 
     // Streams the request body to disk; never buffers it in memory, so 5+ GB uploads are fine.
-    async receive(stream, expected) {
+    // expected null: the size is not known up front (a chunked upload, as Finder sends big files); at most limit bytes.
+    async receive(stream, expected, limit = expected) {
       const id = crypto.randomBytes(16).toString('hex');
       const part = path.join(tmp, id);
       let n = 0;
       const guard = new Transform({
         transform(chunk, _enc, cb) {
           n += chunk.length;
-          cb(n > expected ? bad('The upload is larger than its declared size.') : null, chunk);
+          cb(n <= limit ? null : expected == null ? Object.assign(bad('The file is larger than allowed.'), { status: 413 }) : bad('The upload is larger than its declared size.'), chunk);
         },
       });
       let seen = 0;
       const watch = setInterval(() => {
-        if (n - seen < 16384 && n < expected) stream.destroy(Object.assign(new Error('The upload stalled. Try again.'), { status: 408 }));
+        if (n - seen < 16384 && (expected == null || n < expected)) stream.destroy(Object.assign(new Error('The upload stalled. Try again.'), { status: 408 }));
         seen = n;
       }, stallMs);
       try {
         await pipeline(stream, guard, fs.createWriteStream(part, { flags: 'wx' }));
-        if (n !== expected) throw bad('The upload was interrupted. Try again.');
+        if (expected != null && n !== expected) throw bad('The upload was interrupted. Try again.');
         await fsp.mkdir(path.dirname(file(id)), { recursive: true });
         await fsp.rename(part, file(id));
         return id;
