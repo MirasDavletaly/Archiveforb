@@ -7,14 +7,47 @@ package main
 // Finder shows it under Locations in the sidebar (and it is pinned to Favorites once), every folder the person can
 // open is there, and a file is downloaded when it is opened. The password is this computer's token.
 
+/*
+#cgo LDFLAGS: -framework NetFS -framework CoreFoundation
+#include <NetFS/NetFS.h>
+#include <stdlib.h>
+#include <string.h>
+
+// The same mount Finder makes, with no dialogs: whatever would need one (a password, a certificate question) comes
+// back as an error code instead of a window nobody may be there to answer.
+static int cf_mount(const char *url, const char *user, const char *pass, char *out, int outlen) {
+	CFURLRef u = CFURLCreateWithBytes(NULL, (const UInt8 *)url, (CFIndex)strlen(url), kCFStringEncodingUTF8, NULL);
+	if (!u) return -1;
+	CFStringRef cu = CFStringCreateWithCString(NULL, user, kCFStringEncodingUTF8);
+	CFStringRef cp = CFStringCreateWithCString(NULL, pass, kCFStringEncodingUTF8);
+	CFMutableDictionaryRef open = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+	CFDictionarySetValue(open, kNAUIOptionKey, kNAUIOptionNoUI);
+	CFArrayRef points = NULL;
+	int r = NetFSMountURLSync(u, NULL, cu, cp, open, NULL, &points);
+	out[0] = 0;
+	if (r == 0 && points && CFArrayGetCount(points) > 0) {
+		CFStringRef p = (CFStringRef)CFArrayGetValueAtIndex(points, 0);
+		if (!CFStringGetCString(p, out, outlen, kCFStringEncodingUTF8)) out[0] = 0;
+	}
+	if (points) CFRelease(points);
+	CFRelease(open);
+	CFRelease(cp);
+	CFRelease(cu);
+	CFRelease(u);
+	return r;
+}
+*/
+import "C"
+
 import (
-	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
 	"os/exec"
 	"strings"
 	"time"
+	"unsafe"
 )
 
 const driveSupported = true
@@ -43,17 +76,28 @@ func driveMountPoint(cfg Config) string {
 	return ""
 }
 
-// mountDrive asks Finder to connect the drive. The script goes in on stdin, so the token never shows in the list of
-// running programs.
+// mountDrive connects the drive the way Finder does (NetFS, mounted under /Volumes), without any dialog. The token
+// is handed over in memory, never on a command line.
 func mountDrive(cfg Config) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "osascript", "-")
-	cmd.Stdin = strings.NewReader(`mount volume ` + asQuote(driveURL(cfg)) + ` as user name "computer" with password ` + asQuote(cfg.Token))
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%v %s", err, strings.TrimSpace(string(out)))
+	cu, cn, cp := C.CString(driveURL(cfg)), C.CString("computer"), C.CString(cfg.Token)
+	done := make(chan error, 1)
+	go func() { // freed here, not on return: after a timeout the call may still be using them
+		defer C.free(unsafe.Pointer(cu))
+		defer C.free(unsafe.Pointer(cn))
+		defer C.free(unsafe.Pointer(cp))
+		buf := make([]byte, 1024)
+		if r := C.cf_mount(cu, cn, cp, (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))); r != 0 {
+			done <- fmt.Errorf("the system could not connect it (NetFS code %d)", int(r))
+			return
+		}
+		done <- nil
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(2 * time.Minute):
+		return errors.New("no answer from the server in 2 minutes")
 	}
-	return nil
 }
 
 // runDrive keeps the drive connected while this computer is paired: at start, then every 10 minutes (every minute

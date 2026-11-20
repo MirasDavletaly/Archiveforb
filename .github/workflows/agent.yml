@@ -64,6 +64,13 @@ jobs:
       - name: Network drive (Finder's WebDAV client)
         run: node --disable-warning=ExperimentalWarning agent/test/drive-e2e.mjs
         env: { AGENT: '${{ github.workspace }}/agent/build/agent-test', APP_URL: 'file://${{ github.workspace }}/', WORK: '${{ runner.temp }}' }
+      - name: Screen when the drive test failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drive-screen
+          path: ${{ runner.temp }}/drive-screen.png
+          if-no-files-found: ignore
 
   # Files on demand on a clean Windows machine (the Cloud Files API, as OneDrive uses it), and the folder mode.
   windows-test:

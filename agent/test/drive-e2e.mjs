@@ -23,7 +23,13 @@ const key = path.join(W, 'key.pem'), cert = path.join(W, 'cert.pem');
 await run('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '2', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost']);
 await run('sudo', ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k', '/Library/Keychains/System.keychain', cert]);
 const A = createApp({ ...loadConfig({ PORT: String(SECURE), PUBLIC_URL: `https://localhost:${SECURE}`, ALLOWED_HOSTS: `127.0.0.1:${PLAIN}` }), dataDir: path.join(W, 'data') });
-const servers = [https.createServer({ key: fs.readFileSync(key), cert: fs.readFileSync(cert) }, A.handle), http.createServer(A.handle)];
+// what macOS's WebDAV client asked for, shown when something fails
+const davLog = [];
+const handle = (req, res) => {
+  if (req.url.startsWith('/dav')) res.on('close', () => davLog.push(`${req.method} ${decodeURIComponent(req.url)} → ${res.statusCode}${req.headers.depth ? ` (depth ${req.headers.depth})` : ''}`));
+  return A.handle(req, res);
+};
+const servers = [https.createServer({ key: fs.readFileSync(key), cert: fs.readFileSync(cert) }, handle), http.createServer(A.handle)];
 servers[0].on('upgrade', A.upgrade);
 await new Promise(r => servers[0].listen(SECURE, r)); // every address: localhost may be ::1 or 127.0.0.1
 await new Promise(r => servers[1].listen(PLAIN, '127.0.0.1', r));
@@ -120,7 +126,11 @@ try {
   if (mp && (await mountLine().catch(() => null))) await run('umount', [mp]).catch(() => run('diskutil', ['unmount', 'force', mp]).catch(() => {}));
   const failed = results.some(r => r.startsWith('FAIL'));
   console.log(results.join('\n'));
-  if (failed) console.log('--- agent log:\n' + log());
+  if (failed) {
+    console.log('--- agent log:\n' + log());
+    console.log(`--- WebDAV requests (${davLog.length}, last 60):\n` + davLog.slice(-60).join('\n'));
+    await run('screencapture', ['-x', path.join(process.env.WORK || W, 'drive-screen.png')]).catch(e => console.log('no screenshot: ' + e.message));
+  }
   console.log(failed ? 'SOME FAILED' : 'ALL OK');
   for (const s of servers) s.close();
   process.exit(failed ? 1 : 0);
