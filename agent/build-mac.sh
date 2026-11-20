@@ -92,9 +92,25 @@ rm -f "$DMG"
 hdiutil create -volname "Company Files" -srcfolder "$STAGE" -fs HFS+ -format UDZO -ov "$DMG"
 
 notarize() { # Apple checks the signed .dmg; a refusal stops the build instead of shipping an unnotarized one
-  out=$(xcrun notarytool submit "$DMG" "$@" --wait 2>&1) || { echo "$out"; exit 1; }
-  echo "$out"
-  echo "$out" | grep -q 'status: Accepted' || { echo "notarization was not accepted" >&2; exit 1; }
+  # Submit, then ask for the status every 30 s for up to 90 minutes: a first notarization can take long, and one
+  # dropped connection while waiting (notarytool's own --wait gives up on it) must not fail the build.
+  out=$(xcrun notarytool submit "$DMG" "$@" --output-format json 2>&1) || { echo "$out"; exit 1; }
+  id=$(printf '%s' "$out" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+  [ -n "$id" ] || { echo "$out"; echo "no submission id from Apple" >&2; exit 1; }
+  echo "submitted to Apple: $id"
+  st=""
+  i=0
+  while [ $i -lt 180 ]; do
+    st=$(xcrun notarytool info "$id" "$@" --output-format json 2>/dev/null | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1) || true
+    case "$st" in
+      Accepted) break ;;
+      Invalid|Rejected) xcrun notarytool log "$id" "$@" || true; echo "notarization: $st" >&2; exit 1 ;;
+    esac
+    i=$((i + 1))
+    sleep 30
+  done
+  echo "status: ${st:-unknown}"
+  [ "$st" = "Accepted" ] || { echo "notarization did not finish in 90 minutes" >&2; exit 1; }
   xcrun stapler staple "$DMG"
   spctl -a -t open --context context:primary-signature -v "$DMG"
   echo "dmg notarized"
