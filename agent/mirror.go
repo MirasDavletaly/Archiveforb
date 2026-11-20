@@ -854,16 +854,20 @@ func (s *Syncer) upload(api *API, root, rel, id string, e mirrorEntry) (string, 
 }
 
 // watchLocal looks at the copy of My files every 3 seconds and starts a round when something changed there.
+// Every 3 seconds, or less often for a big folder on a slow computer: a look never takes more than about 5% of the
+// time (a folder that takes 0.5 s to look through is looked at every 10 s), and at least once a minute.
 func (s *Syncer) watchLocal(ctx context.Context) {
-	t := time.NewTicker(3 * time.Second)
-	defer t.Stop()
+	wait := 3 * time.Second
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-time.After(wait):
 		}
-		if s.localChanged() {
+		start := time.Now()
+		changed := s.localChanged()
+		wait = min(max(3*time.Second, 20*time.Since(start)), time.Minute)
+		if changed {
 			s.pokeMirror()
 		}
 	}

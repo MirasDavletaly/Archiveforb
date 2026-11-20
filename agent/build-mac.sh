@@ -20,9 +20,16 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" ../downloads
 go test ./...
 go run ./tools/pack icons build
 iconutil -c icns build/AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns"
+# Runs on macOS 12 Monterey and every later version (the oldest the current Go supports). Without this the C and
+# Objective-C parts would be built for the build machine's own macOS, and older Macs would refuse to start the app.
+export MACOSX_DEPLOYMENT_TARGET=12.0
+export CGO_CFLAGS="-mmacosx-version-min=12.0" CGO_LDFLAGS="-mmacosx-version-min=12.0"
 for arch in arm64 amd64; do
   CGO_ENABLED=1 GOOS=darwin GOARCH=$arch go build -trimpath \
     -ldflags "-s -w -X main.version=$VERSION -X main.defaultServer=$SERVER" -o "$TMP/agent-$arch" .
+  minos=$(vtool -show-build "$TMP/agent-$arch" | awk '/minos/ {print $2; exit}')
+  echo "$arch: runs on macOS $minos and later"
+  [ "$minos" = "12.0" ] || { echo "expected macOS 12.0 as the minimum, got $minos" >&2; exit 1; }
 done
 lipo -create -output "$APP/Contents/MacOS/CompanyFiles" "$TMP/agent-arm64" "$TMP/agent-amd64"
 
