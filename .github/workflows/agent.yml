@@ -3,8 +3,9 @@
 # artifact and put them into downloads/ for the website's Download button.
 #
 # Signing is optional and only happens when the repository has these secrets (Settings → Secrets → Actions):
-#   Mac:     MACOS_CERT_P12, MACOS_CERT_PASSWORD (Developer ID Application), and for notarization
-#            APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD
+#   Mac:     MACOS_CERT_P12, MACOS_CERT_PASSWORD (Developer ID Application), and for notarization either
+#            APPLE_API_KEY, APPLE_API_KEY_ID, APPLE_API_ISSUER (App Store Connect API key, preferred)
+#            or APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD
 #   Windows: WINDOWS_PFX (base64 of a code-signing .pfx), WINDOWS_PFX_PASSWORD
 name: Agent installers
 
@@ -30,6 +31,9 @@ jobs:
         env:
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}

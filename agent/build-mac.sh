@@ -6,7 +6,10 @@
 # macOS asks once before opening it (right-click → Open, or System Settings → Privacy & Security → Open Anyway):
 #   MACOS_CERT_P12        base64 of a "Developer ID Application" certificate exported as .p12
 #   MACOS_CERT_PASSWORD   its password
-#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   for notarization (APPLE_APP_PASSWORD is an app-specific password)
+# and for notarization either an App Store Connect API key (preferred: revocable, no Apple ID password involved)
+#   APPLE_API_KEY (base64 of the .p8 file), APPLE_API_KEY_ID, APPLE_API_ISSUER
+# or an Apple ID with an app-specific password
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD
 set -eu
 cd "$(dirname "$0")"
 SERVER="${SERVER:-https://files.tail81e59e.ts.net}"
@@ -88,14 +91,24 @@ ln -s /Applications "$STAGE/Applications"
 rm -f "$DMG"
 hdiutil create -volname "Company Files" -srcfolder "$STAGE" -fs HFS+ -format UDZO -ov "$DMG"
 
+notarize() { # Apple checks the signed .dmg; a refusal stops the build instead of shipping an unnotarized one
+  out=$(xcrun notarytool submit "$DMG" "$@" --wait 2>&1) || { echo "$out"; exit 1; }
+  echo "$out"
+  echo "$out" | grep -q 'status: Accepted' || { echo "notarization was not accepted" >&2; exit 1; }
+  xcrun stapler staple "$DMG"
+  spctl -a -t open --context context:primary-signature -v "$DMG"
+  echo "dmg notarized"
+}
 if [ -n "$IDENTITY" ]; then
   codesign --timestamp --sign "$IDENTITY" "$DMG"
-  if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_PASSWORD:-}" ]; then
-    xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
-    xcrun stapler staple "$DMG"
-    echo "dmg notarized"
+  if [ -n "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_KEY_ID:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ]; then
+    printf '%s' "$APPLE_API_KEY" | base64 --decode > "$TMP/notary.p8"
+    notarize --key "$TMP/notary.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER"
+    rm -f "$TMP/notary.p8"
+  elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_PASSWORD:-}" ]; then
+    notarize --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
   else
-    echo "dmg signed, not notarized (no APPLE_ID / APPLE_TEAM_ID / APPLE_APP_PASSWORD secrets)"
+    echo "dmg signed, not notarized (no notarization secrets)"
   fi
   security delete-keychain "$KC" || true
 fi
