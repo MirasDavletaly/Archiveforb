@@ -175,6 +175,18 @@ CREATE TABLE IF NOT EXISTS audit(
   node_id INTEGER);
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT, 'audit log is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT, 'audit log is append-only'); END;
+
+-- What changed, in order (a file or folder added, edited, renamed, moved, trashed, erased, or its access changed):
+-- the Mac's File Provider asks "what changed since N" and gets each item as it is now, or "gone" for this person.
+-- Written by the database itself, so no change is missed whoever makes it; rows older than 30 days are dropped.
+CREATE TABLE IF NOT EXISTS changes(seq INTEGER PRIMARY KEY, node_id INTEGER NOT NULL, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS changes_at ON changes(at);
+CREATE TRIGGER IF NOT EXISTS changes_node_add AFTER INSERT ON nodes BEGIN INSERT INTO changes(node_id, at) VALUES(NEW.id, CAST(unixepoch('subsec') * 1000 AS INTEGER)); END;
+CREATE TRIGGER IF NOT EXISTS changes_node_set AFTER UPDATE ON nodes BEGIN INSERT INTO changes(node_id, at) VALUES(NEW.id, CAST(unixepoch('subsec') * 1000 AS INTEGER)); END;
+CREATE TRIGGER IF NOT EXISTS changes_node_del AFTER DELETE ON nodes BEGIN INSERT INTO changes(node_id, at) VALUES(OLD.id, CAST(unixepoch('subsec') * 1000 AS INTEGER)); END;
+CREATE TRIGGER IF NOT EXISTS changes_acl_add AFTER INSERT ON acl BEGIN INSERT INTO changes(node_id, at) VALUES(NEW.node_id, CAST(unixepoch('subsec') * 1000 AS INTEGER)); END;
+CREATE TRIGGER IF NOT EXISTS changes_acl_set AFTER UPDATE ON acl BEGIN INSERT INTO changes(node_id, at) VALUES(NEW.node_id, CAST(unixepoch('subsec') * 1000 AS INTEGER)); END;
+CREATE TRIGGER IF NOT EXISTS changes_acl_del AFTER DELETE ON acl BEGIN INSERT INTO changes(node_id, at) VALUES(OLD.node_id, CAST(unixepoch('subsec') * 1000 AS INTEGER)); END;
 `;
 
 function wrap(raw) {

@@ -1,0 +1,370 @@
+// Company Files in Finder, like OneDrive: a File Provider extension (macOS 12 and later) inside the app. It shows the
+// website's tree (the places of the sidebar, no confidential folders), downloads a file when it is opened, and sends
+// what is made, edited, renamed, moved or deleted here to the website, with the website's rules. What changes on the
+// website comes through the server's change log (the app signals when to look). The server address and this
+// computer's token are in the folder the app and this extension share (the app writes provider.json there).
+
+import FileProvider
+import Foundation
+import UniformTypeIdentifiers
+
+// MARK: - the website
+
+struct Entry: Decodable {
+    let id: Int64
+    let name: String
+    let dir: Bool
+    let size: Int64
+    let v: String
+    let modified: Double
+    let created: Double
+    let readOnly: Bool
+    let parent: Int64?
+}
+
+struct Changes: Decodable {
+    let anchor: Int64
+    let more: Bool?
+    let reset: Bool?
+    let items: [Entry]?
+    let deleted: [Int64]?
+}
+
+struct APIError: Error {
+    let status: Int
+    let message: String
+}
+
+struct Shared: Decodable {
+    let server: String
+    let token: String
+}
+
+final class API {
+    static let shared = API()
+    private let session: URLSession = {
+        let c = URLSessionConfiguration.default
+        c.timeoutIntervalForRequest = 60
+        c.timeoutIntervalForResource = 24 * 3600
+        return URLSession(configuration: c)
+    }()
+
+    // Read for every call: the app rewrites it when this computer is connected again or disconnected.
+    private func shared() throws -> Shared {
+        let group = Bundle.main.object(forInfoDictionaryKey: "CompanyFilesAppGroup") as? String ?? ""
+        guard let dir = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group),
+              let data = try? Data(contentsOf: dir.appendingPathComponent("provider.json")),
+              let s = try? JSONDecoder().decode(Shared.self, from: data), !s.token.isEmpty
+        else { throw NSFileProviderError(.notAuthenticated) }
+        return s
+    }
+
+    private func request(_ method: String, _ path: String, _ query: [String: String] = [:]) throws -> URLRequest {
+        let s = try shared()
+        var u = URLComponents(string: s.server + path)!
+        if !query.isEmpty { u.queryItems = query.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) } }
+        var r = URLRequest(url: u.url!)
+        r.httpMethod = method
+        r.setValue("Bearer " + s.token, forHTTPHeaderField: "Authorization")
+        r.setValue("CompanyFiles-FileProvider", forHTTPHeaderField: "User-Agent")
+        return r
+    }
+
+    private func check(_ data: Data, _ resp: URLResponse) throws -> Data {
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if !(200..<300).contains(status) {
+            let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String ?? ""
+            throw APIError(status: status, message: msg)
+        }
+        return data
+    }
+
+    func json<T: Decodable>(_ method: String, _ path: String, _ query: [String: String] = [:], as type: T.Type) async throws -> T {
+        let (data, resp) = try await session.data(for: try request(method, path, query))
+        return try JSONDecoder().decode(T.self, from: try check(data, resp))
+    }
+
+    func top() async throws -> [Entry] { try await json("GET", "/api/agent/cloud", as: [Entry].self) }
+    func children(_ id: Int64) async throws -> [Entry] { try await json("GET", "/api/agent/cloud/\(id)", as: [Entry].self) }
+    func info(_ id: Int64) async throws -> Entry { try await json("GET", "/api/agent/cloud/\(id)/info", as: Entry.self) }
+    func changes(since: Int64?) async throws -> Changes {
+        try await json("GET", "/api/agent/cloud-changes", since.map { ["since": String($0)] } ?? [:], as: Changes.self)
+    }
+    func folder(in parent: Int64, name: String) async throws -> Entry {
+        try await json("POST", "/api/agent/cloud/\(parent)/folders", ["name": name], as: Entry.self)
+    }
+    func move(_ id: Int64, _ query: [String: String]) async throws -> Entry {
+        try await json("POST", "/api/agent/cloud/\(id)/move", query, as: Entry.self)
+    }
+    func delete(_ id: Int64) async throws {
+        let (data, resp) = try await session.data(for: try request("DELETE", "/api/agent/cloud/\(id)"))
+        _ = try check(data, resp)
+    }
+
+    // A new file (name=) or a new version of one (id= and base=, the version it was based on) in a folder.
+    func upload(to folder: Int64, _ query: [String: String], file: URL?) async throws -> Entry {
+        var r = try request("PUT", "/api/agent/cloud/\(folder)/files", query)
+        r.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        let (data, resp) = file != nil ? try await session.upload(for: r, fromFile: file!) : try await session.upload(for: r, from: Data())
+        return try JSONDecoder().decode(Entry.self, from: try check(data, resp))
+    }
+
+    func download(_ id: Int64, to dest: URL) async throws {
+        let (tmp, resp) = try await session.download(for: try request("GET", "/api/agent/cloud/\(id)/content"))
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if !(200..<300).contains(status) {
+            try? FileManager.default.removeItem(at: tmp)
+            throw APIError(status: status, message: "")
+        }
+        try FileManager.default.moveItem(at: tmp, to: dest)
+    }
+}
+
+// What the system understands: errors of the File Provider kind.
+func fpError(_ e: Error) -> Error {
+    if let a = e as? APIError {
+        switch a.status {
+        case 401: return NSFileProviderError(.notAuthenticated)
+        case 404: return NSFileProviderError(.noSuchItem)
+        case 409: return NSFileProviderError(.filenameCollision)
+        case 413, 507: return NSFileProviderError(.insufficientQuota)
+        case 400, 403: return CocoaError(.fileWriteNoPermission)
+        default: return NSFileProviderError(.serverUnreachable)
+        }
+    }
+    if e is URLError { return NSFileProviderError(.serverUnreachable) }
+    return e
+}
+
+// MARK: - items
+
+func identifier(_ id: Int64) -> NSFileProviderItemIdentifier { NSFileProviderItemIdentifier("n\(id)") }
+
+func nodeID(_ i: NSFileProviderItemIdentifier) -> Int64? {
+    i.rawValue.hasPrefix("n") ? Int64(i.rawValue.dropFirst()) : nil
+}
+
+// Finder's own files, programs' temporary files and Office lock files stay on this computer only.
+func localOnly(_ name: String) -> Bool { name.hasPrefix(".") || name.hasPrefix("~$") || name == "Icon\r" }
+
+final class Item: NSObject, NSFileProviderItem {
+    let e: Entry
+    let parent: NSFileProviderItemIdentifier
+
+    init(_ e: Entry, parent: NSFileProviderItemIdentifier) {
+        self.e = e
+        self.parent = parent
+    }
+
+    convenience init(_ e: Entry) { // with the parent the server gave (0 = the top level)
+        self.init(e, parent: (e.parent ?? 0) == 0 ? .rootContainer : identifier(e.parent!))
+    }
+
+    var itemIdentifier: NSFileProviderItemIdentifier { identifier(e.id) }
+    var parentItemIdentifier: NSFileProviderItemIdentifier { parent }
+    var filename: String { e.name }
+    var contentType: UTType { e.dir ? .folder : (UTType(filenameExtension: (e.name as NSString).pathExtension) ?? .data) }
+    var documentSize: NSNumber? { e.dir ? nil : NSNumber(value: e.size) }
+    var contentModificationDate: Date? { Date(timeIntervalSince1970: e.modified / 1000) }
+    var creationDate: Date? { Date(timeIntervalSince1970: e.created / 1000) }
+    var itemVersion: NSFileProviderItemVersion {
+        NSFileProviderItemVersion(contentVersion: Data((e.dir ? "dir" : e.v).utf8),
+                                  metadataVersion: Data("\(e.name)|\(parent.rawValue)|\(e.modified)|\(e.readOnly)".utf8))
+    }
+    var capabilities: NSFileProviderItemCapabilities {
+        var c: NSFileProviderItemCapabilities = e.dir ? [.allowsReading, .allowsContentEnumerating] : [.allowsReading]
+        if !e.readOnly {
+            c.insert(e.dir ? .allowsAddingSubItems : .allowsWriting)
+            if parent != .rootContainer { c.formUnion([.allowsRenaming, .allowsReparenting, .allowsDeleting]) } // the places stay
+        }
+        return c
+    }
+}
+
+final class RootItem: NSObject, NSFileProviderItem {
+    var itemIdentifier: NSFileProviderItemIdentifier { .rootContainer }
+    var parentItemIdentifier: NSFileProviderItemIdentifier { .rootContainer }
+    var filename: String { "Company Files" }
+    var contentType: UTType { .folder }
+    var capabilities: NSFileProviderItemCapabilities { [.allowsReading, .allowsContentEnumerating] }
+    var itemVersion: NSFileProviderItemVersion { NSFileProviderItemVersion(contentVersion: Data("root".utf8), metadataVersion: Data("root".utf8)) }
+}
+
+// MARK: - the extension
+
+@objc(CFFileProviderExtension)
+final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
+    let domain: NSFileProviderDomain
+    let api = API.shared
+
+    required init(domain: NSFileProviderDomain) {
+        self.domain = domain
+        super.init()
+    }
+
+    func invalidate() {}
+
+    func item(for identifier: NSFileProviderItemIdentifier, request: NSFileProviderRequest,
+              completionHandler: @escaping (NSFileProviderItem?, Error?) -> Void) -> Progress {
+        Task {
+            if identifier == .rootContainer { return completionHandler(RootItem(), nil) }
+            guard let id = nodeID(identifier) else { return completionHandler(nil, NSFileProviderError(.noSuchItem)) }
+            do { completionHandler(Item(try await api.info(id)), nil) } catch { completionHandler(nil, fpError(error)) }
+        }
+        return Progress()
+    }
+
+    func fetchContents(for itemIdentifier: NSFileProviderItemIdentifier, version requestedVersion: NSFileProviderItemVersion?,
+                       request: NSFileProviderRequest, completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void) -> Progress {
+        let progress = Progress(totalUnitCount: 1)
+        Task {
+            guard let id = nodeID(itemIdentifier) else { return completionHandler(nil, nil, NSFileProviderError(.noSuchItem)) }
+            do {
+                let dir = (try? NSFileProviderManager(for: domain)?.temporaryDirectoryURL()) ?? FileManager.default.temporaryDirectory
+                let dest = dir.appendingPathComponent(UUID().uuidString)
+                let e = try await api.info(id)
+                try await api.download(id, to: dest)
+                progress.completedUnitCount = 1
+                completionHandler(dest, Item(e), nil)
+            } catch {
+                completionHandler(nil, nil, fpError(error))
+            }
+        }
+        return progress
+    }
+
+    func createItem(basedOn itemTemplate: NSFileProviderItem, fields: NSFileProviderItemFields, contents url: URL?,
+                    options: NSFileProviderCreateItemOptions = [], request: NSFileProviderRequest,
+                    completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void) -> Progress {
+        Task {
+            let name = itemTemplate.filename
+            if localOnly(name) {
+                if #available(macOS 13.0, *) { return completionHandler(nil, [], false, NSFileProviderError(.excludedFromSync)) }
+                return completionHandler(nil, [], false, CocoaError(.fileWriteNoPermission))
+            }
+            guard let parent = nodeID(itemTemplate.parentItemIdentifier) else { // the top level holds the places
+                return completionHandler(nil, [], false, CocoaError(.fileWriteNoPermission))
+            }
+            do {
+                let isDir = itemTemplate.contentType?.conforms(to: .folder) ?? false
+                let e = isDir ? try await api.folder(in: parent, name: name) : try await api.upload(to: parent, ["name": name], file: url)
+                completionHandler(Item(e, parent: itemTemplate.parentItemIdentifier), [], false, nil)
+            } catch {
+                completionHandler(nil, [], false, fpError(error))
+            }
+        }
+        return Progress()
+    }
+
+    func modifyItem(_ item: NSFileProviderItem, baseVersion version: NSFileProviderItemVersion, changedFields: NSFileProviderItemFields,
+                    contents newContents: URL?, options: NSFileProviderModifyItemOptions = [], request: NSFileProviderRequest,
+                    completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void) -> Progress {
+        Task {
+            guard let id = nodeID(item.itemIdentifier) else { return completionHandler(nil, [], false, NSFileProviderError(.noSuchItem)) }
+            do {
+                var entry: Entry?
+                if changedFields.contains(.filename) || changedFields.contains(.parentItemIdentifier) {
+                    var q = ["name": item.filename]
+                    if changedFields.contains(.parentItemIdentifier) {
+                        guard let p = nodeID(item.parentItemIdentifier) else { return completionHandler(nil, [], false, CocoaError(.fileWriteNoPermission)) }
+                        q["parent"] = String(p)
+                    }
+                    entry = try await api.move(id, q)
+                }
+                if changedFields.contains(.contents), let url = newContents, let folder = nodeID(item.parentItemIdentifier) {
+                    let base = String(decoding: version.contentVersion, as: UTF8.self)
+                    do {
+                        entry = try await api.upload(to: folder, ["id": String(id), "base": base], file: url)
+                    } catch let a as APIError where a.status == 409 {
+                        // Changed on the website meanwhile: this edit is kept as "name (conflict, Mac)" beside it, and
+                        // the website's version comes back under the name.
+                        let ext = (item.filename as NSString).pathExtension
+                        let stem = (item.filename as NSString).deletingPathExtension
+                        _ = try await api.upload(to: folder, ["name": "\(stem) (conflict, Mac)" + (ext.isEmpty ? "" : ".\(ext)")], file: url)
+                        return completionHandler(Item(try await api.info(id)), [], true, nil)
+                    }
+                }
+                let e = entry ?? (try await api.info(id))
+                // a move or upload answer has no parent: it is where the system just put it
+                completionHandler(e.parent == nil ? Item(e, parent: item.parentItemIdentifier) : Item(e), [], false, nil)
+            } catch {
+                completionHandler(nil, [], false, fpError(error))
+            }
+        }
+        return Progress()
+    }
+
+    func deleteItem(identifier: NSFileProviderItemIdentifier, baseVersion version: NSFileProviderItemVersion,
+                    options: NSFileProviderDeleteItemOptions = [], request: NSFileProviderRequest,
+                    completionHandler: @escaping (Error?) -> Void) -> Progress {
+        Task {
+            guard let id = nodeID(identifier) else { return completionHandler(NSFileProviderError(.noSuchItem)) }
+            do {
+                try await api.delete(id) // to the website's trash
+                completionHandler(nil)
+            } catch let a as APIError where a.status == 404 {
+                completionHandler(nil) // gone already
+            } catch let a as APIError where a.status == 403 {
+                completionHandler(NSFileProviderError(.deletionRejected))
+            } catch {
+                completionHandler(fpError(error))
+            }
+        }
+        return Progress()
+    }
+
+    func enumerator(for containerItemIdentifier: NSFileProviderItemIdentifier, request: NSFileProviderRequest) throws -> NSFileProviderEnumerator {
+        Enumerator(containerItemIdentifier)
+    }
+}
+
+// MARK: - listing
+
+final class Enumerator: NSObject, NSFileProviderEnumerator {
+    let container: NSFileProviderItemIdentifier
+    let api = API.shared
+
+    init(_ container: NSFileProviderItemIdentifier) { self.container = container }
+
+    func invalidate() {}
+
+    func enumerateItems(for observer: NSFileProviderEnumerationObserver, startingAt page: NSFileProviderPage) {
+        Task {
+            do {
+                switch container {
+                case .workingSet: break // what changes reaches the system through the change log below
+                case .rootContainer: observer.didEnumerate(try await api.top().map { Item($0, parent: .rootContainer) })
+                default:
+                    guard let id = nodeID(container) else { throw NSFileProviderError(.noSuchItem) }
+                    observer.didEnumerate(try await api.children(id).map { Item($0, parent: container) })
+                }
+                observer.finishEnumerating(upTo: nil)
+            } catch {
+                observer.finishEnumeratingWithError(fpError(error))
+            }
+        }
+    }
+
+    func enumerateChanges(for observer: NSFileProviderChangeObserver, from anchor: NSFileProviderSyncAnchor) {
+        Task {
+            guard container == .workingSet else { return observer.finishEnumeratingChanges(upTo: anchor, moreComing: false) }
+            do {
+                let since = Int64(String(decoding: anchor.rawValue, as: UTF8.self)) ?? 0
+                let ch = try await api.changes(since: since)
+                if ch.reset == true { return observer.finishEnumeratingWithError(NSFileProviderError(.syncAnchorExpired)) }
+                if let items = ch.items, !items.isEmpty { observer.didUpdate(items.map { Item($0) }) }
+                if let gone = ch.deleted, !gone.isEmpty { observer.didDeleteItems(withIdentifiers: gone.map(identifier)) }
+                observer.finishEnumeratingChanges(upTo: NSFileProviderSyncAnchor(Data(String(ch.anchor).utf8)), moreComing: ch.more == true)
+            } catch {
+                observer.finishEnumeratingWithError(fpError(error))
+            }
+        }
+    }
+
+    func currentSyncAnchor(completionHandler: @escaping (NSFileProviderSyncAnchor?) -> Void) {
+        Task {
+            let a = try? await api.changes(since: nil).anchor
+            completionHandler(a.map { NSFileProviderSyncAnchor(Data(String($0).utf8)) })
+        }
+    }
+}

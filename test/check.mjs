@@ -790,6 +790,30 @@ try {
   ws2.destroy();
   pass('Files on demand: the agent sees the website\'s tree (no confidential), fetches on open, read only stays read only, new files, versions, folders, moves and deletions with the website\'s rules, change notices per folder');
 
+  // The Mac's File Provider: one item with its parent, and a change log of what changed since a point.
+  const start = ok(await agent('GET', '/api/agent/cloud-changes', devTok)).anchor;
+  assert.ok(Number.isSafeInteger(start) && start > 0, 'the change log has a current point');
+  const myInfo = ok(await agent('GET', `/api/agent/cloud/${home.id}/info`, devTok));
+  assert.ok(myInfo.name === 'My files' && myInfo.parent === 0, 'a place at the top level: its name there and no parent');
+  const fpFile = ok(await PO.upload(home.id, 'for the mac.txt', 'hello mac')).id;
+  const ch1 = ok(await agent('GET', `/api/agent/cloud-changes?since=${start}`, devTok));
+  const seen = ch1.items.find(x => x.id === fpFile);
+  assert.ok(seen && seen.parent === home.id && seen.v && ch1.anchor > start && !ch1.reset, 'a file added on the website is in the changes, with its parent');
+  assert.equal(ok(await agent('GET', `/api/agent/cloud/${fpFile}/info`, devTok)).parent, home.id);
+  ok(await PO.del(`/api/nodes/${fpFile}`));
+  const ch2 = ok(await agent('GET', `/api/agent/cloud-changes?since=${ch1.anchor}`, devTok));
+  assert.ok(ch2.deleted.includes(fpFile) && !ch2.items.some(x => x.id === fpFile), 'moved to the trash: gone for the computer');
+  ok(await PF3.put(`/api/nodes/${forPavel}/access`, { entries: [] }));
+  const ch3 = ok(await agent('GET', `/api/agent/cloud-changes?since=${ch2.anchor}`, devTok));
+  assert.ok(ch3.deleted.includes(forPavel), 'access taken away: the shared folder is gone for the computer');
+  ok(await PF3.put(`/api/nodes/${forPavel}/access`, { entries: [{ type: 'user', id: owner.id, level: 1 }] }));
+  const ch4 = ok(await agent('GET', `/api/agent/cloud-changes?since=${ch3.anchor}`, devTok));
+  assert.ok(ch4.items.some(x => x.id === forPavel && x.parent === 0 && x.readOnly), 'access given back: it is a place at the top level again (read only)');
+  app.db.run('DELETE FROM changes WHERE seq <= ?', ch3.anchor);
+  assert.ok(ok(await agent('GET', `/api/agent/cloud-changes?since=${start}`, devTok)).reset, 'a point older than the log kept: start over');
+  assert.equal((await asAgent('GET', `/api/agent/cloud/${forPavel}/info`)).status, 200);
+  pass('Mac File Provider: items with their parents, a change log with additions, trashing and access changes, and a reset when a point is too old');
+
   // Network drive for Macs (WebDAV): Finder's view of the same tree, with the computer's token as the password.
   const davBase = `/dav/${encodeURIComponent('Company Files')}`;
   const davAuthH = { authorization: 'Basic ' + Buffer.from(`computer:${devTok}`).toString('base64') };

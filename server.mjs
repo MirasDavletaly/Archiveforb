@@ -1886,6 +1886,37 @@ export function createApp(cfg = loadConfig()) {
   }
   add('GET', '/api/agent/cloud', 'agent', cloudTop);
 
+  // For the Mac's File Provider: an item with its parent there (0 = the top level) and, for a place at the top level,
+  // the name it has there ("My files"). A file shared on its own, outside any folder the person can open, has no
+  // place in the tree (as on Windows) and counts as gone.
+  const topsOf = c => new Map(cloudTop(c).map(t => [t.id, t]));
+  function cloudEntry(r, tops) {
+    const t = tops.get(r.node.id);
+    if (t) return { ...cloudItem(r.node, r.level), name: t.name, parent: 0 };
+    return r.parentLevel ? { ...cloudItem(r.node, r.level), parent: r.node.parent_id } : null;
+  }
+  add('GET', '/api/agent/cloud/:id/info', 'agent', c => cloudEntry(cloudNode(c, c.params.id), topsOf(c)) ?? fail(404, 'Not in the tree.'));
+
+  // What changed since a point of the change log (?since=seq): the items as they are now for this person, and the
+  // ids that are gone for them (deleted, trashed, access taken away). No since: just the current point. A point
+  // older than the log keeps says reset (the computer then lists everything again).
+  add('GET', '/api/agent/cloud-changes', 'agent', c => {
+    const latest = db.get('SELECT MAX(seq) AS s FROM changes').s || 0;
+    const since = Number(c.query.get('since') ?? NaN);
+    if (!Number.isSafeInteger(since) || since < 0) return { anchor: latest };
+    const oldest = db.get('SELECT MIN(seq) AS s FROM changes').s;
+    if (since < latest && (oldest == null || since < oldest - 1)) return { anchor: latest, reset: true };
+    const rows = db.all('SELECT node_id, MAX(seq) AS seq FROM changes WHERE seq > ? GROUP BY node_id ORDER BY seq LIMIT 1000', since);
+    const tops = topsOf(c), res = acl.resolver(c.ctx), items = [], deleted = [];
+    for (const { node_id } of rows) {
+      const r = res(node_id);
+      const e = r?.level && r.area !== 'confidential' ? cloudEntry(r, tops) : null;
+      if (e) items.push(e);
+      else deleted.push(node_id);
+    }
+    return { anchor: rows.length ? rows.at(-1).seq : since, more: rows.length === 1000, items, deleted };
+  });
+
   add('GET', '/api/agent/cloud/:id', 'agent', c => {
     const r = cloudNode(c, c.params.id);
     if (!r.node.is_dir) fail(400, 'Not a folder.');
@@ -3073,6 +3104,7 @@ export function createApp(cfg = loadConfig()) {
     db.run('DELETE FROM sessions WHERE seen_at < ? OR created_at < ?', now - SESSION_IDLE, now - SESSION_MAX);
     db.run('DELETE FROM pair_codes WHERE expires_at < ?', now);
     db.run('DELETE FROM device_queue WHERE done_at < ?', now - 30 * DAY);
+    db.run('DELETE FROM changes WHERE at < ?', now - 30 * DAY);
     userThrottle.sweep();
     loginThrottle.sweep();
     ipThrottle.sweep();

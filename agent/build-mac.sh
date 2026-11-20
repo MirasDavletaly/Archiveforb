@@ -10,12 +10,16 @@
 #   APPLE_API_KEY (base64 of the .p8 file), APPLE_API_KEY_ID, APPLE_API_ISSUER
 # or an Apple ID with an app-specific password
 #   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD
+#
+# Signed, the app also carries the File Provider extension (fileprovider/*.swift): files on demand in Finder, like
+# OneDrive. macOS runs such an extension only when it is signed, so the unsigned build has the network drive instead.
 set -eu
 cd "$(dirname "$0")"
 SERVER="${SERVER:-https://files.tail81e59e.ts.net}"
 VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' main.go | head -n 1)
 TMP=build/mac
 APP="$TMP/Company Files.app"
+APPEX="$APP/Contents/PlugIns/CompanyFilesProvider.appex"
 DMG=../downloads/CompanyFiles.dmg
 rm -rf "$TMP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" ../downloads
@@ -23,13 +27,33 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" ../downloads
 go test ./...
 go run ./tools/pack icons build
 iconutil -c icns build/AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns"
+
+# ---- the signing identity first: its team id names the folder the app and its extension share ----
+IDENTITY=""
+if [ -n "${MACOS_CERT_P12:-}" ] && [ -n "${MACOS_CERT_PASSWORD:-}" ]; then
+  KC="$PWD/$TMP/build.keychain-db"
+  KCPW=$(openssl rand -hex 16)
+  security create-keychain -p "$KCPW" "$KC"
+  security set-keychain-settings -lut 3600 "$KC"
+  security unlock-keychain -p "$KCPW" "$KC"
+  printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$TMP/cert.p12"
+  security import "$TMP/cert.p12" -k "$KC" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+  rm -f "$TMP/cert.p12"
+  security set-key-partition-list -S apple-tool:,apple: -s -k "$KCPW" "$KC" >/dev/null
+  security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+  IDENTITY=$(security find-identity -v -p codesigning "$KC" | sed -n 's/.*"\(Developer ID Application[^"]*\)".*/\1/p' | head -n 1)
+fi
+TEAM=$(printf '%s' "$IDENTITY" | sed -n 's/.*(\([A-Z0-9]*\))$/\1/p')
+GROUP=""
+[ -n "$TEAM" ] && GROUP="$TEAM.com.companyfiles"
+
 # Runs on macOS 12 Monterey and every later version (the oldest the current Go supports). Without this the C and
 # Objective-C parts would be built for the build machine's own macOS, and older Macs would refuse to start the app.
 export MACOSX_DEPLOYMENT_TARGET=12.0
 export CGO_CFLAGS="-mmacosx-version-min=12.0" CGO_LDFLAGS="-mmacosx-version-min=12.0"
 for arch in arm64 amd64; do
   CGO_ENABLED=1 GOOS=darwin GOARCH=$arch go build -trimpath \
-    -ldflags "-s -w -X main.version=$VERSION -X main.defaultServer=$SERVER" -o "$TMP/agent-$arch" .
+    -ldflags "-s -w -X main.version=$VERSION -X main.defaultServer=$SERVER -X main.appGroup=$GROUP" -o "$TMP/agent-$arch" .
   minos=$(vtool -show-build "$TMP/agent-$arch" | awk '/minos/ {print $2; exit}')
   echo "$arch: runs on macOS $minos and later"
   [ "$minos" = "12.0" ] || { echo "expected macOS 12.0 as the minimum, got $minos" >&2; exit 1; }
@@ -62,22 +86,63 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-IDENTITY=""
-if [ -n "${MACOS_CERT_P12:-}" ] && [ -n "${MACOS_CERT_PASSWORD:-}" ]; then
-  KC="$PWD/$TMP/build.keychain-db"
-  KCPW=$(openssl rand -hex 16)
-  security create-keychain -p "$KCPW" "$KC"
-  security set-keychain-settings -lut 3600 "$KC"
-  security unlock-keychain -p "$KCPW" "$KC"
-  printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$TMP/cert.p12"
-  security import "$TMP/cert.p12" -k "$KC" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
-  rm -f "$TMP/cert.p12"
-  security set-key-partition-list -S apple-tool:,apple: -s -k "$KCPW" "$KC" >/dev/null
-  security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
-  IDENTITY=$(security find-identity -v -p codesigning "$KC" | sed -n 's/.*"\(Developer ID Application[^"]*\)".*/\1/p' | head -n 1)
+# ---- the File Provider extension (signed builds only) ----
+if [ -n "$GROUP" ]; then
+  mkdir -p "$APPEX/Contents/MacOS"
+  for arch in arm64 x86_64; do
+    xcrun swiftc -swift-version 5 -O -target "$arch-apple-macos12.0" -parse-as-library -application-extension \
+      -module-name CompanyFilesProvider -Xlinker -application_extension -Xlinker -e -Xlinker _NSExtensionMain \
+      -framework FileProvider -framework UniformTypeIdentifiers fileprovider/*.swift -o "$TMP/provider-$arch"
+  done
+  lipo -create -output "$APPEX/Contents/MacOS/CompanyFilesProvider" "$TMP/provider-arm64" "$TMP/provider-x86_64"
+  cat > "$APPEX/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Company Files</string>
+  <key>CFBundleDisplayName</key><string>Company Files</string>
+  <key>CFBundleIdentifier</key><string>com.companyfiles.agent.provider</string>
+  <key>CFBundleExecutable</key><string>CompanyFilesProvider</string>
+  <key>CFBundlePackageType</key><string>XPC!</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>CompanyFilesAppGroup</key><string>$GROUP</string>
+  <key>NSExtension</key>
+  <dict>
+    <key>NSExtensionPointIdentifier</key><string>com.apple.fileprovider-nonui</string>
+    <key>NSExtensionPrincipalClass</key><string>CFFileProviderExtension</string>
+    <key>NSExtensionFileProviderDocumentGroup</key><string>$GROUP</string>
+    <key>NSExtensionFileProviderSupportsEnumeration</key><true/>
+  </dict>
+</dict>
+</plist>
+EOF
+  cat > "$TMP/provider.entitlements" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>com.apple.security.app-sandbox</key><true/>
+  <key>com.apple.security.network.client</key><true/>
+  <key>com.apple.security.application-groups</key><array><string>$GROUP</string></array>
+</dict></plist>
+EOF
+  cat > "$TMP/app.entitlements" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>com.apple.security.application-groups</key><array><string>$GROUP</string></array>
+</dict></plist>
+EOF
+  echo "File Provider extension built (shared folder $GROUP)"
 fi
+
 if [ -n "$IDENTITY" ]; then
-  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
+  # inside out: the extension (sandboxed) first, then the app around it
+  [ -n "$GROUP" ] && codesign --force --options runtime --timestamp --entitlements "$TMP/provider.entitlements" --sign "$IDENTITY" "$APPEX"
+  codesign --force --options runtime --timestamp ${GROUP:+--entitlements "$TMP/app.entitlements"} --sign "$IDENTITY" "$APP"
+  codesign --verify --deep --strict --verbose=2 "$APP"
   echo "app signed: $IDENTITY"
 else
   codesign --force --sign - "$APP" # ad-hoc: Apple Silicon needs at least this to run the app

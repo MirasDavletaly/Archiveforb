@@ -65,8 +65,12 @@ func (a *App) trayReady() {
 		for {
 			select {
 			case <-open.ClickedCh:
-				if a.config().driveMode() && a.paired() {
-					go driveOpen(a)
+				if c := a.config(); a.paired() && (c.fpMode() || c.driveMode()) {
+					if c.fpMode() {
+						go fpOpen(a)
+					} else {
+						go driveOpen(a)
+					}
 					continue
 				}
 				p := a.config().folder()

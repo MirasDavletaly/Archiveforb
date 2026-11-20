@@ -76,6 +76,36 @@ jobs:
           path: ${{ runner.temp }}/drive-screen.png
           if-no-files-found: ignore
 
+  # Files on demand on a real Mac, as OneDrive does it (Apple's File Provider): the app signed with the Developer ID
+  # (macOS runs the extension only then; not notarized here, nothing is downloaded with a quarantine flag), installed
+  # in /Applications, connected to a throwaway server.
+  mac-fileprovider-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Build the signed app (with the File Provider extension)
+        run: sh agent/build-mac.sh
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      - name: Install it in Applications
+        run: |
+          cp -R "agent/build/mac/Company Files.app" /Applications/
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Applications/Company Files.app"
+          pluginkit -a "/Applications/Company Files.app/Contents/PlugIns/CompanyFilesProvider.appex" || true
+          codesign -d --entitlements - "/Applications/Company Files.app/Contents/PlugIns/CompanyFilesProvider.appex" || true
+          pluginkit -m -v -p com.apple.fileprovider-nonui || true
+      - name: Files on demand in Finder (File Provider)
+        run: node --disable-warning=ExperimentalWarning agent/test/fp-e2e.mjs
+        env: { AGENT: '/Applications/Company Files.app/Contents/MacOS/CompanyFiles', APP_URL: 'file://${{ github.workspace }}/', WORK: '${{ runner.temp }}' }
+
   # Files on demand on a clean Windows machine (the Cloud Files API, as OneDrive uses it), and the folder mode.
   windows-test:
     runs-on: windows-latest

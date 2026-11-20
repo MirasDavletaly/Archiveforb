@@ -211,6 +211,8 @@ func (a *App) handleLink(link string) {
 		switch {
 		case c.cloudMode():
 			message(c.name(), fmt.Sprintf("This computer is connected as %s.\n\n%s is now in File Explorer, on the left (like OneDrive): everything you can open on the website, downloaded when you open it. Folder: %s", c.User, c.name(), cloudRoot(c)))
+		case c.fpMode():
+			message(c.name(), fmt.Sprintf("This computer is connected as %s.\n\n%s is now in Finder, on the left under Locations (like OneDrive): everything you can open on the website, downloaded when you open it.", c.User, c.name()))
 		case c.driveMode():
 			message(c.name(), fmt.Sprintf("This computer is connected as %s.\n\n%s is now in Finder, on the left (under Locations, and in Favorites): everything you can open on the website, downloaded when you open it.", c.User, c.name()))
 		default:
@@ -240,6 +242,7 @@ func (a *App) disconnect() {
 func (a *App) endCloud() {
 	c := a.config()
 	driveTeardown(c) // Mac: the network drive is disconnected
+	fpTeardown(c)    // Mac: the File Provider domain is removed
 	if c.CloudRegistered == "" {
 		return
 	}

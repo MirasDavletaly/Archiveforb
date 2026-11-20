@@ -41,8 +41,13 @@ func startSyncer(a *App) *Syncer {
 	switch c := a.config(); {
 	case c.cloudMode():
 		go s.runCloud(ctx.Done()) // Windows: files on demand for everything the person can open
+	case c.fpMode():
+		go s.runFileProvider(ctx.Done()) // Mac, signed app: files on demand in Finder, like OneDrive
+		if !c.MirrorDone {
+			go s.lastMirror(ctx)
+		}
 	case c.driveMode():
-		go s.runDrive(ctx.Done()) // Mac: the network drive
+		go s.runDrive(ctx.Done()) // Mac, unsigned app: the network drive
 		if !c.MirrorDone {
 			go s.lastMirror(ctx)
 		}
@@ -95,7 +100,7 @@ func (s *Syncer) socket(ctx context.Context) {
 	for ctx.Err() == nil {
 		cfg := s.app.config()
 		u := strings.Replace(strings.Replace(cfg.Server, "https://", "wss://", 1), "http://", "ws://", 1) + "/api/agent/ws"
-		if cfg.cloudMode() {
+		if cfg.cloudMode() || cfg.fpMode() {
 			u += "?cloud=1" // also hear which folders changed
 		}
 		dctx, cancel := context.WithTimeout(ctx, 30*time.Second)

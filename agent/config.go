@@ -39,8 +39,11 @@ func (c Config) CloudProvider() string {
 // cloudMode: files on demand instead of the My files folder copy.
 func (c Config) cloudMode() bool { return cloudSupported && !c.NoCloud }
 
-// driveMode: the Mac's network drive instead of the My files folder copy (NoCloud keeps the folder copy).
-func (c Config) driveMode() bool { return driveSupported && !c.NoCloud }
+// fpMode: on a Mac with the signed app, files on demand through Apple's File Provider (like OneDrive).
+func (c Config) fpMode() bool { return fpSupported() && !c.NoCloud }
+
+// driveMode: an unsigned Mac app's network drive instead of the My files folder copy (NoCloud keeps the folder copy).
+func (c Config) driveMode() bool { return driveSupported && !c.NoCloud && !fpSupported() }
 
 func configDir(override string) string {
 	if override != "" {

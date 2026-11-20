@@ -23,7 +23,7 @@ import (
 )
 
 var (
-	version       = "1.4.0"
+	version       = "1.5.0"
 	defaultServer = "" // -ldflags "-X main.defaultServer=https://files.example.ts.net"
 	appName       = "Company Files"
 	linkScheme    = "myfiles"
@@ -191,7 +191,7 @@ func cliSync(dir string) int {
 	}
 	s := &Syncer{app: a}
 	err := s.run(nilContext())
-	if c := a.config(); !c.cloudMode() && !c.driveMode() {
+	if c := a.config(); !c.cloudMode() && !c.driveMode() && !c.fpMode() {
 		if merr := s.mirror(nilContext()); err == nil {
 			err = merr
 		}
