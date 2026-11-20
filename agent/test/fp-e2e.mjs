@@ -120,8 +120,12 @@ try {
   if (failed) {
     console.log('--- agent log:\n' + log());
     console.log(`--- requests from the extension (${reqLog.length}, last 60):\n` + reqLog.slice(-60).join('\n'));
-    const sys = await run('log', ['show', '--last', '15m', '--style', 'compact', '--predicate', 'process == "CompanyFilesProvider" OR (subsystem == "com.apple.FileProvider" AND eventMessage CONTAINS[c] "companyfiles")'], { maxBuffer: 64 << 20 }).then(r => r.stdout, e => e.message);
-    console.log('--- system log (File Provider, last 150 lines):\n' + sys.split('\n').slice(-150).join('\n'));
+    const sh = cmd => run('sh', ['-c', cmd], { maxBuffer: 64 << 20 }).then(r => r.stdout + r.stderr, e => (e.stdout || '') + e.message);
+    console.log('--- shared folder:\n' + await sh('ls -la ~/Library/Group\\ Containers/ | grep -i companyfiles; ls -la ~/Library/Group\\ Containers/*companyfiles*/ 2>&1'));
+    console.log('--- crash reports:\n' + await sh('ls -t ~/Library/Logs/DiagnosticReports/ /Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i companyfiles | head; f=$(ls -t ~/Library/Logs/DiagnosticReports/*ompanyFiles* 2>/dev/null | head -1); [ -n "$f" ] && head -c 6000 "$f"'));
+    const show = pred => sh(`log show --last 15m --style compact --info --debug --predicate '${pred}'`);
+    console.log('--- the extension\'s own log:\n' + (await show('subsystem == "com.companyfiles.provider" OR process == "CompanyFilesProvider"')).split('\n').slice(-120).join('\n'));
+    console.log('--- File Provider and sandbox trouble with it:\n' + (await show('category CONTAINS[c] "companyfiles" OR eventMessage CONTAINS[c] "companyfiles"')).split('\n').filter(l => /error|fail|denied|deny|crash|exit|kill|sandbox|violat|invalid|unable|cannot|could not/i.test(l)).slice(-100).join('\n'));
   }
   console.log(failed ? 'SOME FAILED' : 'ALL OK');
   for (const s of servers) s.close();

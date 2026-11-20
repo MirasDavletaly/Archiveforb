@@ -6,7 +6,11 @@
 
 import FileProvider
 import Foundation
+import os
 import UniformTypeIdentifiers
+
+// In the system log: log show --predicate 'subsystem == "com.companyfiles.provider"' (the token is never logged)
+let logger = Logger(subsystem: "com.companyfiles.provider", category: "provider")
 
 // MARK: - the website
 
@@ -52,11 +56,19 @@ final class API {
     // Read for every call: the app rewrites it when this computer is connected again or disconnected.
     private func shared() throws -> Shared {
         let group = Bundle.main.object(forInfoDictionaryKey: "CompanyFilesAppGroup") as? String ?? ""
-        guard let dir = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group),
-              let data = try? Data(contentsOf: dir.appendingPathComponent("provider.json")),
-              let s = try? JSONDecoder().decode(Shared.self, from: data), !s.token.isEmpty
-        else { throw NSFileProviderError(.notAuthenticated) }
-        return s
+        guard let dir = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group) else {
+            logger.error("no shared folder for group \(group, privacy: .public)")
+            throw NSFileProviderError(.notAuthenticated)
+        }
+        let file = dir.appendingPathComponent("provider.json")
+        do {
+            let s = try JSONDecoder().decode(Shared.self, from: Data(contentsOf: file))
+            if s.token.isEmpty { throw NSFileProviderError(.notAuthenticated) }
+            return s
+        } catch {
+            logger.error("cannot read \(file.path, privacy: .public): \(String(describing: error), privacy: .public)")
+            throw NSFileProviderError(.notAuthenticated)
+        }
     }
 
     private func request(_ method: String, _ path: String, _ query: [String: String] = [:]) throws -> URLRequest {
@@ -80,8 +92,13 @@ final class API {
     }
 
     func json<T: Decodable>(_ method: String, _ path: String, _ query: [String: String] = [:], as type: T.Type) async throws -> T {
-        let (data, resp) = try await session.data(for: try request(method, path, query))
-        return try JSONDecoder().decode(T.self, from: try check(data, resp))
+        do {
+            let (data, resp) = try await session.data(for: try request(method, path, query))
+            return try JSONDecoder().decode(T.self, from: try check(data, resp))
+        } catch {
+            logger.error("\(method, privacy: .public) \(path, privacy: .public): \(String(describing: error), privacy: .public)")
+            throw error
+        }
     }
 
     func top() async throws -> [Entry] { try await json("GET", "/api/agent/cloud", as: [Entry].self) }
@@ -200,6 +217,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     required init(domain: NSFileProviderDomain) {
         self.domain = domain
         super.init()
+        logger.notice("started for domain \(domain.identifier.rawValue, privacy: .public)")
     }
 
     func invalidate() {}
@@ -330,6 +348,7 @@ final class Enumerator: NSObject, NSFileProviderEnumerator {
     func invalidate() {}
 
     func enumerateItems(for observer: NSFileProviderEnumerationObserver, startingAt page: NSFileProviderPage) {
+        logger.notice("listing \(self.container.rawValue, privacy: .public)")
         Task {
             do {
                 switch container {

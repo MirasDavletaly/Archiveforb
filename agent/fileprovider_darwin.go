@@ -80,7 +80,11 @@ func fpShare(cfg Config, token string) error {
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(dir, "provider.json"))
+	if err := os.Rename(tmp, filepath.Join(dir, "provider.json")); err != nil {
+		return err
+	}
+	log.Printf("files on demand: the extension's settings are in %s", dir)
+	return nil
 }
 
 func fpSignal(cfg Config) {
