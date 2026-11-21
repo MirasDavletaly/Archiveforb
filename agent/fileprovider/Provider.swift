@@ -53,9 +53,24 @@ final class API {
         return URLSession(configuration: c)
     }()
 
+    private static var group: String { Bundle.main.object(forInfoDictionaryKey: "CompanyFilesAppGroup") as? String ?? "" }
+
+    // "provider-ok" in the shared folder: the app checks it to know this extension really works (else it falls back
+    // to the network drive). Written at most once a minute.
+    private let okLock = NSLock()
+    private var okAt = Date.distantPast
+    func markOK() {
+        okLock.lock()
+        let due = Date().timeIntervalSince(okAt) > 60
+        if due { okAt = Date() }
+        okLock.unlock()
+        guard due, let dir = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: API.group) else { return }
+        try? Data(String(Date().timeIntervalSince1970).utf8).write(to: dir.appendingPathComponent("provider-ok"), options: .atomic)
+    }
+
     // Read for every call: the app rewrites it when this computer is connected again or disconnected.
     private func shared() throws -> Shared {
-        let group = Bundle.main.object(forInfoDictionaryKey: "CompanyFilesAppGroup") as? String ?? ""
+        let group = API.group
         guard let dir = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group) else {
             logger.error("no shared folder for group \(group, privacy: .public)")
             throw NSFileProviderError(.notAuthenticated)
@@ -94,7 +109,9 @@ final class API {
     func json<T: Decodable>(_ method: String, _ path: String, _ query: [String: String] = [:], as type: T.Type) async throws -> T {
         do {
             let (data, resp) = try await session.data(for: try request(method, path, query))
-            return try JSONDecoder().decode(T.self, from: try check(data, resp))
+            let out = try JSONDecoder().decode(T.self, from: try check(data, resp))
+            markOK()
+            return out
         } catch {
             logger.error("\(method, privacy: .public) \(path, privacy: .public): \(String(describing: error), privacy: .public)")
             throw error
@@ -218,6 +235,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         self.domain = domain
         super.init()
         logger.notice("started for domain \(domain.identifier.rawValue, privacy: .public)")
+        Task { _ = try? await API.shared.changes(since: nil) } // reach the website once at start: the app sees it works
     }
 
     func invalidate() {}

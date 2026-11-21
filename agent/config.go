@@ -26,6 +26,9 @@ type Config struct {
 	// round (its local changes went up) when this Mac switched to the drive.
 	DrivePinned bool `json:"drive_pinned,omitempty"`
 	MirrorDone  bool `json:"mirror_done,omitempty"`
+	// FPFailed: the version whose File Provider did not come up on this Mac; that version uses the network drive
+	// instead, and the next version tries again.
+	FPFailed string `json:"fp_failed,omitempty"`
 }
 
 // CloudProvider names the cloud folder registration with Windows (tests use their own, so they never touch a real one).
@@ -40,10 +43,13 @@ func (c Config) CloudProvider() string {
 func (c Config) cloudMode() bool { return cloudSupported && !c.NoCloud }
 
 // fpMode: on a Mac with the signed app, files on demand through Apple's File Provider (like OneDrive).
-func (c Config) fpMode() bool { return fpSupported() && !c.NoCloud }
+func (c Config) fpMode() bool { return fpSupported() && !c.NoCloud && c.FPFailed != version }
 
-// driveMode: an unsigned Mac app's network drive instead of the My files folder copy (NoCloud keeps the folder copy).
-func (c Config) driveMode() bool { return driveSupported && !c.NoCloud && !fpSupported() }
+// driveMode: the Mac's network drive instead of the My files folder copy, for an unsigned app or when the File
+// Provider did not come up (NoCloud keeps the folder copy).
+func (c Config) driveMode() bool {
+	return driveSupported && !c.NoCloud && (!fpSupported() || c.FPFailed == version)
+}
 
 func configDir(override string) string {
 	if override != "" {

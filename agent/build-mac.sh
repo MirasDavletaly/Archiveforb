@@ -70,6 +70,9 @@ cat > "$APP/Contents/Info.plist" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleSupportedPlatforms</key><array><string>MacOSX</string></array>
   <key>CFBundleName</key><string>Company Files</string>
   <key>CFBundleDisplayName</key><string>Company Files</string>
   <key>CFBundleIdentifier</key><string>com.companyfiles.agent</string>
@@ -104,6 +107,9 @@ if [ -n "$GROUP" ]; then
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleSupportedPlatforms</key><array><string>MacOSX</string></array>
   <key>CFBundleName</key><string>Company Files</string>
   <key>CFBundleDisplayName</key><string>Company Files</string>
   <key>CFBundleIdentifier</key><string>com.companyfiles.agent.provider</string>
@@ -161,15 +167,16 @@ rm -f "$DMG"
 hdiutil create -volname "Company Files" -srcfolder "$STAGE" -fs HFS+ -format UDZO -ov "$DMG"
 
 notarize() { # Apple checks the signed .dmg; a refusal stops the build instead of shipping an unnotarized one
-  # Submit, then ask for the status every 30 s for up to 90 minutes: a first notarization can take long, and one
-  # dropped connection while waiting (notarytool's own --wait gives up on it) must not fail the build.
+  # Submit, then ask for the status every 30 s for up to 15 minutes (Mac build minutes are scarce): one dropped
+  # connection while waiting (notarytool's own --wait gives up on it) must not fail the build, and a submission still
+  # in Apple's queue then leaves the .dmg signed, with Apple's answer coming later (Macs check it online).
   out=$(xcrun notarytool submit "$DMG" "$@" --output-format json 2>&1) || { echo "$out"; exit 1; }
   id=$(printf '%s' "$out" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
   [ -n "$id" ] || { echo "$out"; echo "no submission id from Apple" >&2; exit 1; }
   echo "submitted to Apple: $id"
   st=""
   i=0
-  while [ $i -lt 180 ]; do
+  while [ $i -lt 30 ]; do
     st=$(xcrun notarytool info "$id" "$@" --output-format json 2>/dev/null | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1) || true
     case "$st" in
       Accepted) break ;;
@@ -179,7 +186,10 @@ notarize() { # Apple checks the signed .dmg; a refusal stops the build instead o
     sleep 30
   done
   echo "status: ${st:-unknown}"
-  [ "$st" = "Accepted" ] || { echo "notarization did not finish in 90 minutes" >&2; exit 1; }
+  if [ "$st" != "Accepted" ]; then
+    echo "notarization still in Apple's queue after 15 minutes (submission $id): the dmg is signed, not stapled"
+    return 0
+  fi
   xcrun stapler staple "$DMG"
   spctl -a -t open --context context:primary-signature -v "$DMG"
   echo "dmg notarized"

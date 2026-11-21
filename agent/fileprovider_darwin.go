@@ -25,6 +25,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 	"unsafe"
@@ -94,23 +95,45 @@ func fpSignal(cfg Config) {
 	C.cfFPSignal(id, name)
 }
 
-// runFileProvider keeps the provider going while this computer is paired.
+// runFileProvider keeps the provider going while this computer is paired. If it does not come up (the extension
+// never reaches the website within a few minutes), this Mac uses the network drive instead, so the files are always
+// there; the next version of the app tries the provider again.
 func (s *Syncer) runFileProvider(stop <-chan struct{}) {
 	cfg := s.app.config()
-	driveTeardown(cfg) // a Mac that had the network drive before: the provider replaces it
+	start := time.Now()
+	fallback := func(why string) {
+		log.Printf("files on demand: %s; using the network drive instead", why)
+		fpTeardown(cfg)
+		_ = s.app.update(func(c *Config) { c.FPFailed = version })
+		s.runDrive(stop)
+	}
+	// The extension is registered and switched on for this user (as Finder's settings would), in case macOS has not
+	// done it yet for a freshly installed app.
+	appex := filepath.Join(filepath.Dir(exePath()), "..", "PlugIns", "CompanyFilesProvider.appex")
+	_ = exec.Command("pluginkit", "-a", appex).Run()
+	_ = exec.Command("pluginkit", "-e", "use", "-i", "com.companyfiles.agent.provider").Run()
 	if err := fpShare(cfg, cfg.Token); err != nil {
-		log.Printf("files on demand: %v", err)
-		s.app.setStatus("Files on demand could not start: " + err.Error())
+		fallback(err.Error())
 		return
 	}
 	if _, err := fpCall(func(id, name, buf *C.char, n C.int) C.int { return C.cfFPAdd(id, name, buf, n) }, cfg); err != nil {
-		log.Printf("files on demand: %v", err)
-		s.app.setStatus("Files on demand could not start: " + err.Error())
+		fallback("the system did not add it: " + err.Error())
 		return
 	}
 	root, _ := fpCall(func(id, name, buf *C.char, n C.int) C.int { return C.cfFPRoot(id, name, buf, n) }, cfg)
-	log.Printf("files on demand: %s is in Finder (%s)", cfg.name(), root)
 	fpSignal(cfg)
+	if !fpWorking(start, root, stop) {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		fallback("the Finder extension did not reach the website in 5 minutes")
+		return
+	}
+	driveTeardown(cfg) // a Mac that had the network drive before: the provider replaces it
+	log.Printf("files on demand: %s is in Finder (%s)", cfg.name(), root)
+	s.app.setStatus("")
 	tick := time.NewTicker(10 * time.Minute)
 	defer tick.Stop()
 	for {
@@ -123,6 +146,30 @@ func (s *Syncer) runFileProvider(stop <-chan struct{}) {
 			fpSignal(cfg)
 		}
 	}
+}
+
+// fpWorking waits up to 5 minutes for the extension's "provider-ok" mark (written when it reaches the website),
+// looking into Finder's folder meanwhile so the system starts the extension.
+func fpWorking(start time.Time, root string, stop <-chan struct{}) bool {
+	dir, err := groupDir()
+	if err != nil {
+		return false
+	}
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		if st, err := os.Stat(filepath.Join(dir, "provider-ok")); err == nil && st.ModTime().After(start.Add(-time.Second)) {
+			return true
+		}
+		if root != "" {
+			_, _ = os.ReadDir(root)
+		}
+		select {
+		case <-stop:
+			return false
+		case <-time.After(5 * time.Second):
+		}
+	}
+	return false
 }
 
 // fpOpen shows the provider's folder in Finder.
