@@ -1670,7 +1670,7 @@ async function computersCard() {
     toast(`"${d.name}" is disconnected.`);
     route();
   });
-  return card('Your files on your computer', 'On Windows, Company Files appears in File Explorer like OneDrive: everything you can open here shows up, files download when you open them, and whatever you add, edit, rename or delete there comes back here (it then stays on the computer only as an icon, unless you choose "Always keep on this device"). On Mac and Linux, My files is kept in sync as a folder. Select files and press Enter to save copies to your computers.',
+  return card('Your files on your computer', 'On Windows, Company Files appears in File Explorer like OneDrive: everything you can open here shows up, files download when you open them, and whatever you add, edit, rename or delete there comes back here (it then stays on the computer only as an icon, unless you choose "Always keep on this device"). On a Mac it appears in Finder the same way, once you switch it on in System Settings → File Providers (the app asks); until then your files are on the Company Files network drive in Finder. On Linux, My files is kept in sync as a folder. Select files and press Enter to save copies to your computers.',
     h('div', { class: 'stack' },
       h('div', { class: 'row' },
         mine

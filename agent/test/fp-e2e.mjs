@@ -5,7 +5,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
-import { readdir, readFile, writeFile, mkdir, rename, unlink } from 'node:fs/promises';
+import { readdir, readFile, writeFile, mkdir, rename, unlink, open } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn, execFile } from 'node:child_process';
@@ -24,10 +24,22 @@ await run('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout'
 await run('sudo', ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k', '/Library/Keychains/System.keychain', cert]);
 const A = createApp({ ...loadConfig({ PORT: String(SECURE), PUBLIC_URL: `https://localhost:${SECURE}`, ALLOWED_HOSTS: `127.0.0.1:${PLAIN}` }), dataDir: path.join(W, 'data') });
 const reqLog = []; // what the extension asked the website for, shown when something fails
+const T0 = Date.now();
+const trace = []; // every HTTPS request (macOS's WebDAV client, the app, the extension) with its timing
 const handle = (req, res) => {
-  if (req.url.startsWith('/api/agent/cloud')) res.on('close', () => reqLog.push(`${req.method} ${decodeURIComponent(req.url)} → ${res.statusCode}`));
+  const at = Date.now(), h = req.headers;
+  const what = `${req.method} ${decodeURIComponent(req.url)}${h.depth ? ` depth ${h.depth}` : ''}${h['content-length'] ? ` len ${h['content-length']}` : ''}${h['transfer-encoding'] ? ` ${h['transfer-encoding']}` : ''}${h.expect ? ` expect ${h.expect}` : ''}`;
+  const stamp = t => `+${((t - T0) / 1000).toFixed(1)}s`;
+  trace.push({ at, line: `${stamp(at)} > ${what}` });
+  res.on('close', () => {
+    const t = Date.now();
+    trace.push({ at: t, line: `${stamp(t)} < ${res.statusCode} ${what} (${t - at} ms)` });
+    if (req.url.startsWith('/api/agent/cloud')) reqLog.push(`${req.method} ${decodeURIComponent(req.url)} → ${res.statusCode}`);
+  });
   return A.handle(req, res);
 };
+const traceSince = at => trace.filter(x => x.at >= at).slice(0, 150).map(x => '    ' + x.line).join('\n');
+const sh = cmd => run('sh', ['-c', cmd], { maxBuffer: 64 << 20, timeout: 30000 }).then(r => r.stdout + r.stderr, e => (e.stdout || '') + (e.stderr || '') + e.message);
 const servers = [https.createServer({ key: fs.readFileSync(key), cert: fs.readFileSync(cert) }, handle), http.createServer(A.handle)];
 servers[0].on('upgrade', A.upgrade);
 await new Promise(r => servers[0].listen(SECURE, r));
@@ -75,6 +87,81 @@ const until = async (fn, ms = 60000) => {
 };
 const log = () => { try { return fs.readFileSync(path.join(CFG, 'agent.log'), 'utf8'); } catch { return '(no log)'; } };
 const storage = path.join(os.homedir(), 'Library', 'CloudStorage');
+
+// A person switches the provider on in System Settings (the app opens the place); here a script clicks the switch as
+// a person would, through the accessibility interface. It prints what it sees, so a changed System Settings layout
+// shows up in the log. RESULT is CLICKED, ALREADY ON, OPENED (it opened the File Providers list; run again) or empty.
+const CLICK = `on run
+  set out to {}
+  set found to false
+  set acted to ""
+  tell application "System Events"
+    if not (exists process "System Settings") then return "RESULT no System Settings"
+    tell process "System Settings"
+      set frontmost to true
+      repeat with w in windows
+        set end of out to "WINDOW"
+        repeat with e in (entire contents of w)
+          set {r, n, d, v} to {"", "", "", ""}
+          try
+            set r to role of e as text
+          end try
+          try
+            set n to name of e as text
+          end try
+          try
+            set d to description of e as text
+          end try
+          try
+            set v to value of e as text
+          end try
+          set end of out to r & " | " & n & " | " & d & " | " & v
+          if n contains "Company Files" or d contains "Company Files" or v contains "Company Files" then set found to true
+          if acted is "" and r is "AXCheckBox" and (found or n contains "Company" or d contains "Company") then
+            if v is "0" then
+              click e
+              set acted to "CLICKED"
+            else
+              set acted to "ALREADY ON"
+            end if
+          end if
+        end repeat
+      end repeat
+      if acted is "" and not found then
+        try
+          repeat with e in (entire contents of window 1)
+            try
+              if role of e is "AXButton" and ((description of e as text) contains "File Provider" or (name of e as text) contains "File Provider") then
+                click e
+                set acted to "OPENED"
+                exit repeat
+              end if
+            end try
+          end repeat
+        end try
+      end if
+    end tell
+  end tell
+  set end of out to "RESULT " & acted
+  set AppleScript's text item delimiters to linefeed
+  return out as text
+end run`;
+const SHOTS = process.env.WORK || W;
+async function switchOn() {
+  console.log('--- can a script use System Settings here?\n' + await sh(`csrutil status; sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "select client, auth_value from access where service='kTCCServiceAccessibility'" 2>&1 | head -30; fileproviderctl help 2>&1 | head -40`));
+  await run('open', ['x-apple.systempreferences:com.apple.ExtensionsPreferences?extensionPointIdentifier=com.apple.fileprovider-nonui']);
+  let out = '';
+  for (let i = 1; i <= 4; i++) {
+    await sleep(5000);
+    await sh(`screencapture -x "${SHOTS}/fp-settings-${i}.png"`);
+    out = await run('osascript', ['-e', CLICK], { timeout: 90000, maxBuffer: 16 << 20 }).then(r => r.stdout + r.stderr, e => `${e.stdout || ''}${e.stderr || ''}RESULT error ${e.message}`);
+    console.log(`--- System Settings, try ${i} (what a script sees):\n` + out.split('\n').slice(-150).join('\n'));
+    if (/RESULT (CLICKED|ALREADY ON)/.test(out)) break;
+  }
+  await sleep(3000);
+  await sh(`screencapture -x "${SHOTS}/fp-settings-after.png"`);
+  return /RESULT (CLICKED|ALREADY ON)/.test(out);
+}
 let agent, root;
 try {
   const code = (await U.req('POST', '/api/devices/pair-code')).code;
@@ -105,13 +192,29 @@ try {
     expect(`meanwhile the network drive is connected: ${line || 'no'}`, drive);
     if (!drive) throw new Error('no network drive either; agent log:\n' + log());
     const mp = line.slice(line.indexOf(' on ') + 4, line.lastIndexOf(' ('));
-    // the first write through macOS's WebDAV client can be slow (it locks, writes an empty file, then the content)
-    const t0 = Date.now();
-    await timed('writing on the drive', writeFile(path.join(mp, 'My files', 'via-drive.txt'), 'made on the drive'), 120000);
-    results.push(`info writing on the drive took ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+    // each step of a write timed, with what macOS's WebDAV client asked meanwhile
+    const write = async (name, text) => {
+      const t0 = Date.now(), steps = [];
+      const step = async (what, p) => { const t = Date.now(); const r = await timed(`${name}: ${what}`, p, 120000); steps.push(`${what} ${((Date.now() - t) / 1000).toFixed(1)} s`); return r; };
+      const fh = await step('create', open(path.join(mp, 'My files', name), 'w'));
+      await step('write', fh.write(text));
+      await step('close', fh.close());
+      results.push(`info writing ${name} on the drive took ${((Date.now() - t0) / 1000).toFixed(1)} s (${steps.join(', ')})`);
+      console.log(`--- requests while writing ${name}:\n` + traceSince(t0));
+    };
+    await write('via-drive.txt', 'made on the drive');
+    await write('second.txt', 'the second one');
     expect('a file made on the network drive reaches the website', await until(async () => { const n = await child(home, 'via-drive.txt'); return n && (await content(n.id)) === 'made on the drive'; }));
     expect('a file from the website opens on the network drive', await until(async () => (await readFile(path.join(mp, 'My files', 'before.txt'), 'utf8')) === 'there before the Mac connected'));
-    throw Object.assign(new Error('done'), { done: true }); // the provider itself needs a person; nothing more to check here
+
+    // switched on as a person would: then the provider itself is checked below
+    const done = Object.assign(new Error('done'), { done: true });
+    if (!await switchOn()) { results.push('info a script could not switch it on here (see the System Settings lines above)'); throw done; }
+    const turned = await until(async () => /files on demand: turned on/.test(log()), 120000);
+    results.push(`info ${turned ? 'switched on in System Settings' : 'clicked in System Settings, but macOS still has it off'}`);
+    if (!turned) throw done;
+    await until(async () => /is in Finder|using the network drive instead/.test(log()), 420000);
+    expect('switched on: the provider reaches the website and takes over from the network drive', /is in Finder/.test(log()));
   }
   let top = [];
   expect('it shows the places from the website', await until(async () => (top = await readdir(root)).includes('My files')));
@@ -149,7 +252,7 @@ try {
   if (!e.done) results.push('FAIL ' + e.stack);
 } finally {
   // The safety net: when files on demand does not come up, the app switches to the network drive by itself.
-  if (results.some(r => r.startsWith('FAIL')) && agent && agent.exitCode === null) {
+  if (results.some(r => r.startsWith('FAIL')) && !/is in Finder/.test(log()) && agent && agent.exitCode === null) {
     const mounted = await until(async () => (await run('mount')).stdout.includes(`localhost:${SECURE}/dav/Company%20Files`), 420000);
     results.push(`${mounted ? 'ok  ' : 'FAIL'} fallback: the app switched to the network drive by itself`);
   }
@@ -159,7 +262,6 @@ try {
   if (failed) {
     console.log('--- agent log:\n' + log());
     console.log(`--- requests from the extension (${reqLog.length}, last 60):\n` + reqLog.slice(-60).join('\n'));
-    const sh = cmd => run('sh', ['-c', cmd], { maxBuffer: 64 << 20, timeout: 30000 }).then(r => r.stdout + r.stderr, e => (e.stdout || '') + e.message);
     console.log('--- shared folder:\n' + await sh('ls -la ~/Library/Group\\ Containers/ | grep -i companyfiles; ls -la ~/Library/Group\\ Containers/*companyfiles*/ 2>&1'));
     console.log('--- crash reports:\n' + await sh('ls -t ~/Library/Logs/DiagnosticReports/ /Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i companyfiles | head; f=$(ls -t ~/Library/Logs/DiagnosticReports/*ompanyFiles* 2>/dev/null | head -1); [ -n "$f" ] && head -c 6000 "$f"'));
     const show = pred => sh(`log show --last 15m --style compact --info --debug --predicate '${pred}'`);

@@ -25,8 +25,10 @@ await run('sudo', ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k'
 const A = createApp({ ...loadConfig({ PORT: String(SECURE), PUBLIC_URL: `https://localhost:${SECURE}`, ALLOWED_HOSTS: `127.0.0.1:${PLAIN}` }), dataDir: path.join(W, 'data') });
 // what macOS's WebDAV client asked for, shown when something fails
 const davLog = [];
+const T0 = Date.now();
 const handle = (req, res) => {
-  if (req.url.startsWith('/dav')) res.on('close', () => davLog.push(`${req.method} ${decodeURIComponent(req.url)} → ${res.statusCode}${req.headers.depth ? ` (depth ${req.headers.depth})` : ''}`));
+  const at = Date.now();
+  if (req.url.startsWith('/dav')) res.on('close', () => davLog.push(`+${((at - T0) / 1000).toFixed(1)}s ${req.method} ${decodeURIComponent(req.url)} → ${res.statusCode} in ${Date.now() - at} ms${req.headers.depth ? ` (depth ${req.headers.depth})` : ''}`));
   return A.handle(req, res);
 };
 const servers = [https.createServer({ key: fs.readFileSync(key), cert: fs.readFileSync(cert) }, handle), http.createServer(A.handle)];
@@ -85,7 +87,10 @@ try {
   const my = path.join(mp, 'My files');
 
   // ---- here → website ----
+  const t0 = Date.now(), seen = davLog.length;
   await writeFile(path.join(my, 'from-mac.txt'), 'typed on a Mac');
+  results.push(`info the first write took ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+  console.log('--- WebDAV requests of the first write:\n' + davLog.slice(seen).join('\n'));
   let madeId;
   expect('a file made on the drive is on the website', await until(async () => { const n = await child(home, 'from-mac.txt'); madeId = n?.id; return n && (await content(n.id)) === 'typed on a Mac'; }));
   await mkdir(path.join(my, 'Mac folder'));

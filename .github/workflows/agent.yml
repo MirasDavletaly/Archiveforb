@@ -82,7 +82,7 @@ jobs:
   mac-fileprovider-test:
     needs: mac # the very .dmg people download: signed and notarized by Apple
     runs-on: macos-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -105,6 +105,13 @@ jobs:
       - name: Files on demand in Finder (File Provider)
         run: node --disable-warning=ExperimentalWarning agent/test/fp-e2e.mjs
         env: { AGENT: '/Applications/Company Files.app/Contents/MacOS/CompanyFiles', APP_URL: 'file://${{ github.workspace }}/', WORK: '${{ runner.temp }}', UV_THREADPOOL_SIZE: '64' }
+      - name: System Settings as the test saw it
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fp-screens
+          path: ${{ runner.temp }}/fp-settings-*.png
+          if-no-files-found: ignore
 
   # Files on demand on a clean Windows machine (the Cloud Files API, as OneDrive uses it), and the folder mode.
   windows-test:
