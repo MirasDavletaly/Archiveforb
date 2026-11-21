@@ -60,9 +60,19 @@ const kids = async id => (await U.req('GET', `/api/nodes/${id}`)).children;
 const child = async (id, name) => (await kids(id)).find(x => x.name === name);
 const content = async id => (await U.req('GET', `/api/nodes/${id}/content`)).toString();
 
+// Printed as they happen, so a run that hangs still shows how far it got. A file operation on the provider's folder
+// can wait for the extension forever: each try gives up after 25 s (more libuv threads keep stuck ones from blocking
+// the rest: UV_THREADPOOL_SIZE in the workflow).
 const results = [];
-const expect = (label, ok) => results.push(`${ok ? 'ok  ' : 'FAIL'} ${label}`);
-const until = async (fn, ms = 60000) => { const t = Date.now(); while (Date.now() - t < ms) { try { if (await fn()) return true; } catch {} await sleep(1000); } return false; };
+const expect = (label, ok) => { const line = `${ok ? 'ok  ' : 'FAIL'} ${label}`; results.push(line); console.log(line); };
+const until = async (fn, ms = 60000) => {
+  const t = Date.now();
+  while (Date.now() - t < ms) {
+    try { if (await Promise.race([fn(), sleep(25000).then(() => false)])) return true; } catch {}
+    await sleep(1000);
+  }
+  return false;
+};
 const log = () => { try { return fs.readFileSync(path.join(CFG, 'agent.log'), 'utf8'); } catch { return '(no log)'; } };
 const storage = path.join(os.homedir(), 'Library', 'CloudStorage');
 let agent, root;
@@ -89,17 +99,18 @@ try {
   expect('a file that is on the website opens (downloaded when opened)', await until(async () => (await readFile(path.join(my, 'before.txt'), 'utf8')) === 'there before the Mac connected'));
 
   // ---- here → website ----
-  await writeFile(path.join(my, 'from-mac.txt'), 'typed on a Mac');
+  const timed = (what, p) => Promise.race([p, sleep(25000).then(() => { throw new Error(`${what} took over 25 s (the extension did not answer)`); })]);
+  await timed('writing a file', writeFile(path.join(my, 'from-mac.txt'), 'typed on a Mac'));
   let madeId;
   expect('a file made here goes to the website', await until(async () => { const n = await child(home, 'from-mac.txt'); madeId = n?.id; return n && (await content(n.id)) === 'typed on a Mac'; }));
-  await mkdir(path.join(my, 'Mac folder'));
+  await timed('making a folder', mkdir(path.join(my, 'Mac folder')));
   expect('a folder made here goes to the website', await until(async () => !!(await child(home, 'Mac folder'))));
   const folderId = (await child(home, 'Mac folder'))?.id;
-  await rename(path.join(my, 'from-mac.txt'), path.join(my, 'Mac folder', 'renamed.txt'));
+  await timed('renaming', rename(path.join(my, 'from-mac.txt'), path.join(my, 'Mac folder', 'renamed.txt')));
   expect('renamed and moved here: the same file on the website', await until(async () => (await child(folderId, 'renamed.txt'))?.id === madeId));
-  await writeFile(path.join(my, 'Mac folder', 'renamed.txt'), 'edited on a Mac');
+  await timed('editing', writeFile(path.join(my, 'Mac folder', 'renamed.txt'), 'edited on a Mac'));
   expect('edited here: a new version on the website', await until(async () => (await content(madeId)) === 'edited on a Mac' && (await U.req('GET', `/api/nodes/${madeId}/versions`)).length >= 1));
-  await writeFile(path.join(my, '.DS_Store'), 'finder stuff');
+  await timed('writing .DS_Store', writeFile(path.join(my, '.DS_Store'), 'finder stuff'));
   await sleep(3000);
   expect('Finder\'s own files stay on this Mac', !A.db.get(`SELECT 1 FROM nodes WHERE name LIKE '.%'`));
 
@@ -113,7 +124,7 @@ try {
   expect('deleted on the website: gone here', await until(async () => !(await readdir(my)).includes('renamed on site.txt'), 90000));
 
   // ---- deleting here ----
-  await unlink(path.join(my, 'Mac folder', 'renamed.txt'));
+  await timed('deleting', unlink(path.join(my, 'Mac folder', 'renamed.txt')));
   expect('deleted here: in the website trash', await until(async () => (await U.req('GET', '/api/trash')).some(t => t.id === madeId)));
 } catch (e) {
   results.push('FAIL ' + e.stack);
