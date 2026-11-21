@@ -15,6 +15,7 @@ package main
 int cfFPAdd(const char *ident, const char *name, char *err, int errlen);
 int cfFPRemove(const char *ident, const char *name, char *err, int errlen);
 int cfFPSignal(const char *ident, const char *name);
+int cfFPEnabled(const char *ident);
 int cfFPRoot(const char *ident, const char *name, char *out, int outlen);
 int cfGroupPath(const char *group, char *out, int outlen);
 */
@@ -121,6 +122,29 @@ func (s *Syncer) runFileProvider(stop <-chan struct{}) {
 		return
 	}
 	root, _ := fpCall(func(id, name, buf *C.char, n C.int) C.int { return C.cfFPRoot(id, name, buf, n) }, cfg)
+	if fpEnabled() == 0 {
+		// macOS keeps a new provider off until the person switches it on (System Settings → File Providers); no
+		// program can. Meanwhile the network drive has the files, and the person is asked once.
+		log.Printf("files on demand: waiting for it to be turned on in System Settings (File Providers); the network drive works meanwhile")
+		s.app.setStatus("Turn on " + cfg.name() + " in System Settings → File Providers to see it in Finder like OneDrive")
+		if !cfg.FPAsked && !s.app.headless {
+			_ = s.app.update(func(c *Config) { c.FPAsked = true })
+			go fpAskEnable(cfg.name())
+		}
+		driveStop := make(chan struct{})
+		go s.runDrive(driveStop)
+		for fpEnabled() == 0 {
+			select {
+			case <-stop:
+				close(driveStop)
+				return
+			case <-time.After(30 * time.Second):
+			}
+		}
+		close(driveStop)
+		log.Printf("files on demand: turned on")
+		start = time.Now()
+	}
 	fpSignal(cfg)
 	if !fpWorking(start, root, stop) {
 		select {
@@ -145,6 +169,19 @@ func (s *Syncer) runFileProvider(stop <-chan struct{}) {
 		case <-s.cloudKick: // the website says something changed
 			fpSignal(cfg)
 		}
+	}
+}
+
+func fpEnabled() int {
+	id := cstr(fpDomain)
+	defer C.free(unsafe.Pointer(id))
+	return int(C.cfFPEnabled(id))
+}
+
+// fpAskEnable asks once to switch the provider on, and opens the place in System Settings where that is done.
+func fpAskEnable(name string) {
+	if confirm(name, name+" can sit in Finder on the left, like OneDrive: every folder you can open on the website, with files downloaded when you open them.\n\nmacOS asks you to switch it on once. Click OK, then turn on "+name+" under File Providers.\n\nUntil then your files are on the "+name+" network drive in Finder.") {
+		openURL("x-apple.systempreferences:com.apple.ExtensionsPreferences?extensionPointIdentifier=com.apple.fileprovider-nonui")
 	}
 }
 
@@ -175,6 +212,11 @@ func fpWorking(start time.Time, root string, stop <-chan struct{}) bool {
 // fpOpen shows the provider's folder in Finder.
 func fpOpen(a *App) {
 	cfg := a.config()
+	if fpEnabled() == 0 { // not switched on yet: the files are on the network drive meanwhile
+		go fpAskEnable(cfg.name())
+		driveOpen(a)
+		return
+	}
 	root, err := fpCall(func(id, name, buf *C.char, n C.int) C.int { return C.cfFPRoot(id, name, buf, n) }, cfg)
 	if err != nil || root == "" {
 		message(cfg.name(), cfg.name()+" is not ready in Finder yet. Try again in a minute.")

@@ -50,6 +50,22 @@ int cfFPRemove(const char *ident, const char *name, char *err, int errlen) {
 	return 0;
 }
 
+// Whether the person has switched the domain on: macOS keeps a new provider off until they do so in System
+// Settings (File Providers); no program can switch it on. 1 on, 0 off, -1 unknown (not added, no answer).
+int cfFPEnabled(const char *ident) {
+	NSString *want = [NSString stringWithUTF8String:ident];
+	dispatch_semaphore_t s = dispatch_semaphore_create(0);
+	__block int r = -1;
+	[NSFileProviderManager getDomainsWithCompletionHandler:^(NSArray<NSFileProviderDomain *> *domains, NSError *error) {
+		for (NSFileProviderDomain *d in domains) {
+			if ([d.identifier isEqualToString:want]) r = d.userEnabled ? 1 : 0;
+		}
+		dispatch_semaphore_signal(s);
+	}];
+	if (cfWait(s)) return -1;
+	return r;
+}
+
 // Something changed on the website: the system asks the extension what (its "working set" changes).
 int cfFPSignal(const char *ident, const char *name) {
 	NSFileProviderManager *m = [NSFileProviderManager managerForDomain:cfDomain(ident, name)];

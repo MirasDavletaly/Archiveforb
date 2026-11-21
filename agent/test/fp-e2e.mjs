@@ -93,13 +93,29 @@ try {
   root = root && path.join(storage, root);
   expect(`Company Files is in Finder's cloud storage: ${root || 'no'}`, found);
   if (!root) throw new Error('no File Provider folder; agent log:\n' + log());
+  const timed = (what, p) => Promise.race([p, sleep(25000).then(() => { throw new Error(`${what} took over 25 s (no answer)`); })]);
+
+  // macOS keeps a new provider off until a person switches it on in System Settings (File Providers), and no program
+  // can do it: on a test machine it stays off. Meanwhile the app connects the network drive, which must work.
+  const waiting = await until(async () => /waiting for it to be turned on/.test(log()), 60000);
+  results.push('info ' + (waiting ? 'macOS keeps the new provider off until a person switches it on (System Settings → File Providers); a test machine cannot' : 'the provider was on from the start'));
+  if (waiting) {
+    let line;
+    const drive = await until(async () => !!(line = (await run('mount')).stdout.split('\n').find(l => l.includes(`localhost:${SECURE}/dav/Company%20Files`) && l.includes('(webdav'))), 180000);
+    expect(`meanwhile the network drive is connected: ${line || 'no'}`, drive);
+    if (!drive) throw new Error('no network drive either; agent log:\n' + log());
+    const mp = line.slice(line.indexOf(' on ') + 4, line.lastIndexOf(' ('));
+    await timed('writing on the drive', writeFile(path.join(mp, 'My files', 'via-drive.txt'), 'made on the drive'));
+    expect('a file made on the network drive reaches the website', await until(async () => { const n = await child(home, 'via-drive.txt'); return n && (await content(n.id)) === 'made on the drive'; }));
+    expect('a file from the website opens on the network drive', await until(async () => (await readFile(path.join(mp, 'My files', 'before.txt'), 'utf8')) === 'there before the Mac connected'));
+    throw Object.assign(new Error('done'), { done: true }); // the provider itself needs a person; nothing more to check here
+  }
   let top = [];
   expect('it shows the places from the website', await until(async () => (top = await readdir(root)).includes('My files')));
   const my = path.join(root, 'My files');
   expect('a file that is on the website opens (downloaded when opened)', await until(async () => (await readFile(path.join(my, 'before.txt'), 'utf8')) === 'there before the Mac connected'));
 
   // ---- here → website ----
-  const timed = (what, p) => Promise.race([p, sleep(25000).then(() => { throw new Error(`${what} took over 25 s (the extension did not answer)`); })]);
   await timed('writing a file', writeFile(path.join(my, 'from-mac.txt'), 'typed on a Mac'));
   let madeId;
   expect('a file made here goes to the website', await until(async () => { const n = await child(home, 'from-mac.txt'); madeId = n?.id; return n && (await content(n.id)) === 'typed on a Mac'; }));
@@ -127,7 +143,7 @@ try {
   await timed('deleting', unlink(path.join(my, 'Mac folder', 'renamed.txt')));
   expect('deleted here: in the website trash', await until(async () => (await U.req('GET', '/api/trash')).some(t => t.id === madeId)));
 } catch (e) {
-  results.push('FAIL ' + e.stack);
+  if (!e.done) results.push('FAIL ' + e.stack);
 } finally {
   // The safety net: when files on demand does not come up, the app switches to the network drive by itself.
   if (results.some(r => r.startsWith('FAIL')) && agent && agent.exitCode === null) {
@@ -140,13 +156,12 @@ try {
   if (failed) {
     console.log('--- agent log:\n' + log());
     console.log(`--- requests from the extension (${reqLog.length}, last 60):\n` + reqLog.slice(-60).join('\n'));
-    const sh = cmd => run('sh', ['-c', cmd], { maxBuffer: 64 << 20 }).then(r => r.stdout + r.stderr, e => (e.stdout || '') + e.message);
+    const sh = cmd => run('sh', ['-c', cmd], { maxBuffer: 64 << 20, timeout: 30000 }).then(r => r.stdout + r.stderr, e => (e.stdout || '') + e.message);
     console.log('--- shared folder:\n' + await sh('ls -la ~/Library/Group\\ Containers/ | grep -i companyfiles; ls -la ~/Library/Group\\ Containers/*companyfiles*/ 2>&1'));
     console.log('--- crash reports:\n' + await sh('ls -t ~/Library/Logs/DiagnosticReports/ /Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i companyfiles | head; f=$(ls -t ~/Library/Logs/DiagnosticReports/*ompanyFiles* 2>/dev/null | head -1); [ -n "$f" ] && head -c 6000 "$f"'));
     const show = pred => sh(`log show --last 15m --style compact --info --debug --predicate '${pred}'`);
     console.log('--- the extension\'s own log:\n' + (await show('subsystem == "com.companyfiles.provider" OR process == "CompanyFilesProvider"')).split('\n').slice(-120).join('\n'));
     console.log('--- everything that names the extension (launchd, runningboard, pkd, sandbox, fileproviderd):\n' + (await show('eventMessage CONTAINS[c] "CompanyFilesProvider" OR eventMessage CONTAINS[c] "companyfiles.agent.provider" OR category CONTAINS[c] "companyfiles"')).split('\n').slice(-160).join('\n'));
-    console.log('--- the domain as the system sees it:\n' + (await sh('fileproviderctl dump 2>&1 | grep -iE "companyfiles|enabled|disabled|disconnect|userEnabled|hidden" | head -60')));
     console.log('--- fileproviderd errors:\n' + (await show('process == "fileproviderd" AND (messageType == error OR messageType == fault)')).split('\n').slice(-60).join('\n'));
     console.log('--- the extension started by hand (shows a loading error, if any):\n' + await sh('"/Applications/Company Files.app/Contents/PlugIns/CompanyFilesProvider.appex/Contents/MacOS/CompanyFilesProvider" & p=$!; sleep 4; kill $p 2>/dev/null; wait $p; echo "exit $?"'));
     console.log('--- its signature and entitlements:\n' + await sh('codesign -d --entitlements :- -vv "/Applications/Company Files.app/Contents/PlugIns/CompanyFilesProvider.appex" 2>&1 | head -40; spctl -a -vv "/Applications/Company Files.app" 2>&1'));

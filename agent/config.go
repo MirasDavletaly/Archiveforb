@@ -29,6 +29,8 @@ type Config struct {
 	// FPFailed: the version whose File Provider did not come up on this Mac; that version uses the network drive
 	// instead, and the next version tries again.
 	FPFailed string `json:"fp_failed,omitempty"`
+	// FPAsked: the person was asked once to switch the File Provider on in System Settings.
+	FPAsked bool `json:"fp_asked,omitempty"`
 }
 
 // CloudProvider names the cloud folder registration with Windows (tests use their own, so they never touch a real one).
