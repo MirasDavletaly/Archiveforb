@@ -80,24 +80,23 @@ jobs:
   # (macOS runs the extension only then; not notarized here, nothing is downloaded with a quarantine flag), installed
   # in /Applications, connected to a throwaway server.
   mac-fileprovider-test:
+    needs: mac # the very .dmg people download: signed and notarized by Apple
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26.x' # the last Go that builds for macOS 12 (see build-mac.sh)
-          cache-dependency-path: agent/go.sum
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Build the signed app (with the File Provider extension)
-        run: sh agent/build-mac.sh
-        env:
-          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
-          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: installers-mac
+          path: dl
       - name: Install it in Applications
         run: |
-          cp -R "agent/build/mac/Company Files.app" /Applications/
+          hdiutil attach dl/CompanyFiles.dmg -nobrowse -mountpoint /tmp/cfdmg
+          cp -R "/tmp/cfdmg/Company Files.app" /Applications/
+          hdiutil detach /tmp/cfdmg
+          spctl -a -vv "/Applications/Company Files.app" || true
           /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Applications/Company Files.app"
           pluginkit -a "/Applications/Company Files.app/Contents/PlugIns/CompanyFilesProvider.appex" || true
           pluginkit -e use -i com.companyfiles.agent.provider || true

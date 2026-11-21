@@ -118,6 +118,11 @@ try {
 } catch (e) {
   results.push('FAIL ' + e.stack);
 } finally {
+  // The safety net: when files on demand does not come up, the app switches to the network drive by itself.
+  if (results.some(r => r.startsWith('FAIL')) && agent && agent.exitCode === null) {
+    const mounted = await until(async () => (await run('mount')).stdout.includes(`localhost:${SECURE}/dav/Company%20Files`), 420000);
+    results.push(`${mounted ? 'ok  ' : 'FAIL'} fallback: the app switched to the network drive by itself`);
+  }
   if (agent && agent.exitCode === null) agent.kill();
   const failed = results.some(r => r.startsWith('FAIL'));
   console.log(results.join('\n'));
@@ -130,6 +135,7 @@ try {
     const show = pred => sh(`log show --last 15m --style compact --info --debug --predicate '${pred}'`);
     console.log('--- the extension\'s own log:\n' + (await show('subsystem == "com.companyfiles.provider" OR process == "CompanyFilesProvider"')).split('\n').slice(-120).join('\n'));
     console.log('--- everything that names the extension (launchd, runningboard, pkd, sandbox, fileproviderd):\n' + (await show('eventMessage CONTAINS[c] "CompanyFilesProvider" OR eventMessage CONTAINS[c] "companyfiles.agent.provider" OR category CONTAINS[c] "companyfiles"')).split('\n').slice(-160).join('\n'));
+    console.log('--- the domain as the system sees it:\n' + (await sh('fileproviderctl dump 2>&1 | grep -iE "companyfiles|enabled|disabled|disconnect|userEnabled|hidden" | head -60')));
     console.log('--- fileproviderd errors:\n' + (await show('process == "fileproviderd" AND (messageType == error OR messageType == fault)')).split('\n').slice(-60).join('\n'));
     console.log('--- the extension started by hand (shows a loading error, if any):\n' + await sh('"/Applications/Company Files.app/Contents/PlugIns/CompanyFilesProvider.appex/Contents/MacOS/CompanyFilesProvider" & p=$!; sleep 4; kill $p 2>/dev/null; wait $p; echo "exit $?"'));
     console.log('--- its signature and entitlements:\n' + await sh('codesign -d --entitlements :- -vv "/Applications/Company Files.app/Contents/PlugIns/CompanyFilesProvider.appex" 2>&1 | head -40; spctl -a -vv "/Applications/Company Files.app" 2>&1'));
