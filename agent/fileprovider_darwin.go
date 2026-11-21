@@ -134,6 +134,9 @@ func (s *Syncer) runFileProvider(stop <-chan struct{}) {
 		driveStop := make(chan struct{})
 		go s.runDrive(driveStop)
 		for fpEnabled() == 0 {
+			// The switch comes after this moment, and the extension starts (and marks that it works) at once,
+			// possibly before this loop sees it: a mark from now on is new.
+			start = time.Now()
 			select {
 			case <-stop:
 				close(driveStop)
@@ -143,10 +146,8 @@ func (s *Syncer) runFileProvider(stop <-chan struct{}) {
 		}
 		close(driveStop)
 		log.Printf("files on demand: turned on")
-		start = time.Now()
 	}
-	fpSignal(cfg)
-	if !fpWorking(start, root, stop) {
+	if !fpWorking(cfg, start, root, stop) {
 		select {
 		case <-stop:
 			return
@@ -185,9 +186,10 @@ func fpAskEnable(name string) {
 	}
 }
 
-// fpWorking waits up to 5 minutes for the extension's "provider-ok" mark (written when it reaches the website),
-// looking into Finder's folder meanwhile so the system starts the extension.
-func fpWorking(start time.Time, root string, stop <-chan struct{}) bool {
+// fpWorking waits up to 5 minutes for the extension's "provider-ok" mark (written when it reaches the website, at
+// most once a minute), asking the system meanwhile to have the extension look for changes, so it does reach the
+// website even when nobody opens the folder. Looking into the folder starts it too where this process may.
+func fpWorking(cfg Config, start time.Time, root string, stop <-chan struct{}) bool {
 	dir, err := groupDir()
 	if err != nil {
 		return false
@@ -197,6 +199,7 @@ func fpWorking(start time.Time, root string, stop <-chan struct{}) bool {
 		if st, err := os.Stat(filepath.Join(dir, "provider-ok")); err == nil && st.ModTime().After(start.Add(-time.Second)) {
 			return true
 		}
+		fpSignal(cfg)
 		if root != "" {
 			_, _ = os.ReadDir(root)
 		}

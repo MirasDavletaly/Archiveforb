@@ -23,7 +23,7 @@ import (
 )
 
 var (
-	version       = "1.5.0"
+	version       = "1.5.1"
 	defaultServer = "" // -ldflags "-X main.defaultServer=https://files.example.ts.net"
 	appName       = "Company Files"
 	linkScheme    = "myfiles"
