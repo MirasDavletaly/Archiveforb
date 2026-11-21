@@ -165,16 +165,16 @@ on run
 end run`;
 const SHOTS = process.env.WORK || W;
 async function switchOn() {
-  console.log('--- can a script use System Settings here?\n' + await sh(`csrutil status; sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "select client, auth_value from access where service='kTCCServiceAccessibility'" 2>&1 | head -30; fileproviderctl help 2>&1 | head -40`));
   await run('open', ['x-apple.systempreferences:com.apple.ExtensionsPreferences?extensionPointIdentifier=com.apple.fileprovider-nonui']);
   let out = '';
   for (let i = 1; i <= 4; i++) {
     await sleep(5000);
     await sh(`screencapture -x "${SHOTS}/fp-settings-${i}.png"`);
     out = await run('osascript', ['-e', CLICK], { timeout: 90000, maxBuffer: 16 << 20 }).then(r => r.stdout + r.stderr, e => `${e.stdout || ''}${e.stderr || ''}RESULT error ${e.message}`);
-    console.log(`--- System Settings, try ${i} (what a script sees):\n` + out.split('\n').slice(-150).join('\n'));
     if (/RESULT (CLICKED|ALREADY ON)/.test(out)) break;
+    console.log(`--- System Settings, try ${i} (what a script sees):\n` + out.split('\n').slice(-150).join('\n'));
   }
+  if (!/RESULT (CLICKED|ALREADY ON)/.test(out)) console.log('--- can a script use System Settings here?\n' + await sh(`csrutil status; sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "select client, auth_value from access where service='kTCCServiceAccessibility'" 2>&1 | head -30`));
   await sleep(3000);
   await sh(`screencapture -x "${SHOTS}/fp-settings-after.png"`);
   return /RESULT (CLICKED|ALREADY ON)/.test(out);
@@ -199,10 +199,11 @@ try {
   if (!root) throw new Error('no File Provider folder; agent log:\n' + log());
   const timed = (what, p, ms = 25000) => Promise.race([p, sleep(ms).then(() => { throw new Error(`${what} took over ${ms / 1000} s (no answer)`); })]);
 
-  // macOS keeps a new provider off until a person switches it on in System Settings (File Providers), and no program
-  // can do it: on a test machine it stays off. Meanwhile the app connects the network drive, which must work.
+  // macOS keeps a new provider off until a person switches it on in System Settings (File Providers); no program can
+  // do it through an API. Meanwhile the app connects the network drive, which must work; then the switch is clicked
+  // here as a person would, and the provider itself is checked.
   const waiting = await until(async () => /waiting for it to be turned on/.test(log()), 60000);
-  results.push('info ' + (waiting ? 'macOS keeps the new provider off until a person switches it on (System Settings → File Providers); a test machine cannot' : 'the provider was on from the start'));
+  results.push('info ' + (waiting ? 'macOS keeps the new provider off until a person switches it on (System Settings → File Providers)' : 'the provider was on from the start'));
   if (waiting) {
     let line;
     const drive = await until(async () => !!(line = (await run('mount')).stdout.split('\n').find(l => l.includes(`localhost:${SECURE}/dav/Company%20Files`) && l.includes('(webdav'))), 180000);
@@ -216,8 +217,9 @@ try {
       const fh = await step('create', open(path.join(mp, 'My files', name), 'w'));
       await step('write', fh.write(text));
       await step('close', fh.close());
-      results.push(`info writing ${name} on the drive took ${((Date.now() - t0) / 1000).toFixed(1)} s (${steps.join(', ')})`);
-      console.log(`--- requests while writing ${name}:\n` + traceSince(t0));
+      const ms = Date.now() - t0;
+      expect(`writing ${name} on the drive: ${(ms / 1000).toFixed(1)} s (${steps.join(', ')})`, ms < 20000);
+      if (ms >= 20000) console.log(`--- requests while writing ${name}:\n` + traceSince(t0));
     };
     await write('via-drive.txt', 'made on the drive');
     await write('second.txt', 'the second one');

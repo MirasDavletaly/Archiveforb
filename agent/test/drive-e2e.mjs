@@ -90,7 +90,8 @@ try {
   const tMount = Date.now();
   const top = await readdir(mp);
   const tList = Date.now();
-  results.push(`info connected ${((tMount - tStart) / 1000).toFixed(1)} s after the app started (${clock(tMount)}); the first listing took ${((tList - tMount) / 1000).toFixed(1)} s (until ${clock(tList)})`);
+  // macOS 15.4+ held a fresh drive for 90 s when the server reported quota properties; it must open at once
+  expect(`the drive opens at once: connected ${((tMount - tStart) / 1000).toFixed(1)} s after the app started, first listing in ${((tList - tMount) / 1000).toFixed(1)} s`, tList - tMount < 20000);
   expect(`it shows the places from the website: ${top.join(', ')}`, top.includes('My files'));
   const my = path.join(mp, 'My files');
 
@@ -98,11 +99,6 @@ try {
   const t0 = Date.now();
   await writeFile(path.join(my, 'from-mac.txt'), 'typed on a Mac');
   results.push(`info the first write took ${((Date.now() - t0) / 1000).toFixed(1)} s`);
-  console.log(`--- requests from the start to the first write (app started ${clock(tStart)}):\n` + davLog.join('\n'));
-  console.log('--- agent log:\n' + log());
-  const when = t => `"$(date -r ${Math.floor(t / 1000)} '+%Y-%m-%d %H:%M:%S')"`;
-  const sysLog = pred => run('sh', ['-c', `log show --start ${when(tMount + 1000)} --end ${when(tList)} --style compact --info --debug --predicate '${pred}' | grep -Ev 'com.apple.network:|CFNetwork|boringssl|runningboard' | head -250`], { maxBuffer: 64 << 20, timeout: 90000 }).then(r => r.stdout + r.stderr, e => e.message);
-  console.log('--- macOS log while connecting was finishing (what took so long):\n' + await sysLog('process IN {"NetAuthSysAgent", "NetAuthAgent", "mount_webdav", "webdavfs_agent", "diskarbitrationd", "agent-test", "Finder", "kernel", "mds", "lsd"} OR eventMessage CONTAINS[c] "webdav" OR eventMessage CONTAINS[c] "Company Files"'));
   let madeId;
   expect('a file made on the drive is on the website', await until(async () => { const n = await child(home, 'from-mac.txt'); madeId = n?.id; return n && (await content(n.id)) === 'typed on a Mac'; }));
   await mkdir(path.join(my, 'Mac folder'));

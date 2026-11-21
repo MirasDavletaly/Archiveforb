@@ -2040,18 +2040,12 @@ export function createApp(cfg = loadConfig()) {
     if (p.level < EDIT) fail(403, 'You can only view this folder.');
     return p;
   }
-  let davFreeAt = 0, davFreeBytes = 0;
-  async function davFree() {
-    if (Date.now() - davFreeAt > 60e3) {
-      const s = await fs.promises.statfs(cfg.dataDir);
-      [davFreeAt, davFreeBytes] = [Date.now(), Math.max(0, s.bavail * s.bsize - cfg.minFree)];
-    }
-    return davFreeBytes;
-  }
-  function davEntry(href, it, free) {
+  // No quota properties: macOS 15.4 and later stalls every mount for 90 s when a WebDAV server reports them (the
+  // workaround Cryptomator ships too; measured on a CI Mac: 90 s from the mount to its first use).
+  function davEntry(href, it) {
     return `<D:response><D:href>${xmlEsc(href)}</D:href><D:propstat><D:prop><D:displayname>${xmlEsc(it.name)}</D:displayname>` +
       (it.dir
-        ? `<D:resourcetype><D:collection/></D:resourcetype><D:quota-available-bytes>${free}</D:quota-available-bytes><D:quota-used-bytes>0</D:quota-used-bytes>`
+        ? '<D:resourcetype><D:collection/></D:resourcetype>'
         : `<D:resourcetype/><D:getcontentlength>${it.size}</D:getcontentlength><D:getcontenttype>${PREVIEW[ext(it.name)] || 'application/octet-stream'}</D:getcontenttype><D:getetag>"${it.v || it.modified}"</D:getetag>`) +
       `<D:getlastmodified>${new Date(it.modified).toUTCString()}</D:getlastmodified><D:creationdate>${new Date(it.created).toISOString()}</D:creationdate>` +
       '<D:supportedlock><D:lockentry><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock>' +
@@ -2119,7 +2113,6 @@ export function createApp(cfg = loadConfig()) {
     const label = `on computer "${c.device.name}" (network drive)`;
 
     if (m === 'PROPFIND') {
-      const free = await davFree();
       const depth = c.req.headers.depth === '0' ? 0 : 1; // "infinity" is answered one level deep
       let self, kids = [];
       if (mem) {
@@ -2132,10 +2125,10 @@ export function createApp(cfg = loadConfig()) {
         self = r.top ? { name: cfg.appName, dir: true, modified: Date.now(), created: Date.now() } : { ...cloudItem(r.node, r.level), name: segs.at(-1) };
         if (depth && self.dir) kids = r.top ? cloudTop(c) : acl.children(c.ctx, r).map(n => cloudItem(n, n.level));
       }
-      const out = [davEntry(davHref(segs, self.dir), self, free), ...kids.map(k => davEntry(davHref([...segs, k.name], k.dir), k, free))];
+      const out = [davEntry(davHref(segs, self.dir), self), ...kids.map(k => davEntry(davHref([...segs, k.name], k.dir), k))];
       if (depth && self.dir) { // temporary files kept in memory for this folder
         const prefix = davKey(c, segs) + (segs.length ? '/' : '');
-        for (const [k, e] of davMem) if (k.startsWith(prefix) && !k.slice(prefix.length).includes('/')) out.push(davEntry(davHref([...segs, e.name], e.dir), memItem(e), free));
+        for (const [k, e] of davMem) if (k.startsWith(prefix) && !k.slice(prefix.length).includes('/')) out.push(davEntry(davHref([...segs, e.name], e.dir), memItem(e)));
       }
       return davXml(c, 207, `<D:multistatus xmlns:D="DAV:">${out.join('')}</D:multistatus>`);
     }
