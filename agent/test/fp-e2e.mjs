@@ -72,7 +72,11 @@ try {
   expect(`paired: ${p.trim().split('\n').pop()}`, /Connected as Mac User/.test(p));
   const cfgFile = path.join(CFG, 'agent.json');
   fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile, 'utf8')), initialized: true }));
+  const pk = () => run('pluginkit', ['-m', '-v', '-v', '-v', '-i', 'com.companyfiles.agent.provider']).then(r => r.stdout.trim(), e => e.message);
+  results.push('info extension before the app starts: ' + (await pk()).replace(/\s+/g, ' '));
   agent = spawn(EXE, ['--config', CFG, '--headless'], { stdio: 'ignore' });
+  await sleep(8000);
+  results.push('info extension once the app runs: ' + (await pk()).replace(/\s+/g, ' '));
 
   // ---- in Finder, like OneDrive: a folder under ~/Library/CloudStorage ----
   const found = await until(async () => (root = (await readdir(storage).catch(() => [])).find(n => /company/i.test(n))) && true, 120000);
@@ -125,7 +129,10 @@ try {
     console.log('--- crash reports:\n' + await sh('ls -t ~/Library/Logs/DiagnosticReports/ /Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i companyfiles | head; f=$(ls -t ~/Library/Logs/DiagnosticReports/*ompanyFiles* 2>/dev/null | head -1); [ -n "$f" ] && head -c 6000 "$f"'));
     const show = pred => sh(`log show --last 15m --style compact --info --debug --predicate '${pred}'`);
     console.log('--- the extension\'s own log:\n' + (await show('subsystem == "com.companyfiles.provider" OR process == "CompanyFilesProvider"')).split('\n').slice(-120).join('\n'));
-    console.log('--- File Provider and sandbox trouble with it:\n' + (await show('category CONTAINS[c] "companyfiles" OR eventMessage CONTAINS[c] "companyfiles"')).split('\n').filter(l => /error|fail|denied|deny|crash|exit|kill|sandbox|violat|invalid|unable|cannot|could not/i.test(l)).slice(-100).join('\n'));
+    console.log('--- everything that names the extension (launchd, runningboard, pkd, sandbox, fileproviderd):\n' + (await show('eventMessage CONTAINS[c] "CompanyFilesProvider" OR eventMessage CONTAINS[c] "companyfiles.agent.provider" OR category CONTAINS[c] "companyfiles"')).split('\n').slice(-160).join('\n'));
+    console.log('--- fileproviderd errors:\n' + (await show('process == "fileproviderd" AND (messageType == error OR messageType == fault)')).split('\n').slice(-60).join('\n'));
+    console.log('--- the extension started by hand (shows a loading error, if any):\n' + await sh('"/Applications/Company Files.app/Contents/PlugIns/CompanyFilesProvider.appex/Contents/MacOS/CompanyFilesProvider" & p=$!; sleep 4; kill $p 2>/dev/null; wait $p; echo "exit $?"'));
+    console.log('--- its signature and entitlements:\n' + await sh('codesign -d --entitlements :- -vv "/Applications/Company Files.app/Contents/PlugIns/CompanyFilesProvider.appex" 2>&1 | head -40; spctl -a -vv "/Applications/Company Files.app" 2>&1'));
   }
   console.log(failed ? 'SOME FAILED' : 'ALL OK');
   for (const s of servers) s.close();
