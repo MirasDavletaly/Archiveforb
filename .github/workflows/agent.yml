@@ -102,8 +102,26 @@ jobs:
           pluginkit -a "/Applications/Company Files.app/Contents/PlugIns/CompanyFilesProvider.appex" || true
           pluginkit -e use -i com.companyfiles.agent.provider || true
           pluginkit -m -v -p com.apple.fileprovider-nonui || true
+      # A CI job runs under launchd, and macOS does not let launchd jobs download cloud files ("dataless" files and
+      # folders fail with EDEADLK); Finder and the apps a person opens may. This wrapper gives the test that right.
+      - name: Let the test open cloud files, as Finder and apps do
+        run: |
+          cat > "$RUNNER_TEMP/materialize.c" <<'EOF'
+          #include <stdio.h>
+          #include <sys/resource.h>
+          #include <unistd.h>
+          int main(int argc, char **argv) {
+            printf("downloading cloud files was %d for this job (0 default, 1 off, 2 on); now on\n", getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_PROCESS));
+            if (setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_PROCESS, IOPOL_MATERIALIZE_DATALESS_FILES_ON)) perror("setiopolicy_np");
+            fflush(stdout);
+            execvp(argv[1], argv + 1);
+            perror("exec");
+            return 127;
+          }
+          EOF
+          clang -o "$RUNNER_TEMP/materialize" "$RUNNER_TEMP/materialize.c"
       - name: Files on demand in Finder (File Provider)
-        run: node --disable-warning=ExperimentalWarning agent/test/fp-e2e.mjs
+        run: '"$RUNNER_TEMP/materialize" node --disable-warning=ExperimentalWarning agent/test/fp-e2e.mjs'
         env: { AGENT: '/Applications/Company Files.app/Contents/MacOS/CompanyFiles', APP_URL: 'file://${{ github.workspace }}/', WORK: '${{ runner.temp }}', UV_THREADPOOL_SIZE: '64' }
       - name: System Settings as the test saw it
         if: always()

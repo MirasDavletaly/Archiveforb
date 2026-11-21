@@ -100,7 +100,9 @@ try {
   results.push(`info the first write took ${((Date.now() - t0) / 1000).toFixed(1)} s`);
   console.log(`--- requests from the start to the first write (app started ${clock(tStart)}):\n` + davLog.join('\n'));
   console.log('--- agent log:\n' + log());
-  console.log('--- macOS log around connecting:\n' + await run('sh', ['-c', `log show --start "$(date -r ${Math.floor(tStart / 1000)} '+%Y-%m-%d %H:%M:%S')" --style compact --info --predicate 'process CONTAINS[c] "webdav" OR process CONTAINS[c] "NetAuth" OR subsystem CONTAINS[c] "netfs" OR eventMessage CONTAINS[c] "webdav"' | head -300`], { maxBuffer: 64 << 20, timeout: 60000 }).then(r => r.stdout + r.stderr, e => e.message));
+  const when = t => `"$(date -r ${Math.floor(t / 1000)} '+%Y-%m-%d %H:%M:%S')"`;
+  const sysLog = pred => run('sh', ['-c', `log show --start ${when(tMount + 1000)} --end ${when(tList)} --style compact --info --debug --predicate '${pred}' | grep -Ev 'com.apple.network:|CFNetwork|boringssl|runningboard' | head -250`], { maxBuffer: 64 << 20, timeout: 90000 }).then(r => r.stdout + r.stderr, e => e.message);
+  console.log('--- macOS log while connecting was finishing (what took so long):\n' + await sysLog('process IN {"NetAuthSysAgent", "NetAuthAgent", "mount_webdav", "webdavfs_agent", "diskarbitrationd", "agent-test", "Finder", "kernel", "mds", "lsd"} OR eventMessage CONTAINS[c] "webdav" OR eventMessage CONTAINS[c] "Company Files"'));
   let madeId;
   expect('a file made on the drive is on the website', await until(async () => { const n = await child(home, 'from-mac.txt'); madeId = n?.id; return n && (await content(n.id)) === 'typed on a Mac'; }));
   await mkdir(path.join(my, 'Mac folder'));
