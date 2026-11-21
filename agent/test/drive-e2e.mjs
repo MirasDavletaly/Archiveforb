@@ -25,14 +25,18 @@ await run('sudo', ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k'
 const A = createApp({ ...loadConfig({ PORT: String(SECURE), PUBLIC_URL: `https://localhost:${SECURE}`, ALLOWED_HOSTS: `127.0.0.1:${PLAIN}` }), dataDir: path.join(W, 'data') });
 // what macOS's WebDAV client asked for, shown when something fails
 const davLog = [];
-const T0 = Date.now();
+const clock = (t = Date.now()) => new Date(t).toISOString().slice(11, 23);
 const handle = (req, res) => {
   const at = Date.now();
-  if (req.url.startsWith('/dav')) res.on('close', () => davLog.push(`+${((at - T0) / 1000).toFixed(1)}s ${req.method} ${decodeURIComponent(req.url)} → ${res.statusCode} in ${Date.now() - at} ms${req.headers.depth ? ` (depth ${req.headers.depth})` : ''}`));
+  if (req.url.startsWith('/dav')) res.on('close', () => davLog.push(`${clock(at)} ${req.method} ${decodeURIComponent(req.url)} → ${res.statusCode} in ${Date.now() - at} ms${req.headers.depth ? ` (depth ${req.headers.depth})` : ''}${req.headers['user-agent'] ? ` [${req.headers['user-agent']}]` : ''}`));
   return A.handle(req, res);
 };
 const servers = [https.createServer({ key: fs.readFileSync(key), cert: fs.readFileSync(cert) }, handle), http.createServer(A.handle)];
 servers[0].on('upgrade', A.upgrade);
+// connections and TLS handshakes too: a client stuck before its first request shows here
+servers[0].on('connection', s => davLog.push(`${clock()} connection from ${s.remoteAddress} port ${s.remotePort}`));
+servers[0].on('secureConnection', s => davLog.push(`${clock()} TLS ready, port ${s.remotePort}`));
+servers[0].on('tlsClientError', (e, s) => davLog.push(`${clock()} TLS failed, port ${s?.remotePort}: ${e.message}`));
 await new Promise(r => servers[0].listen(SECURE, r)); // every address: localhost may be ::1 or 127.0.0.1
 await new Promise(r => servers[1].listen(PLAIN, '127.0.0.1', r));
 const base = `http://127.0.0.1:${PLAIN}`;
@@ -77,20 +81,26 @@ try {
   agent = spawn(EXE, ['--config', CFG, '--headless'], { stdio: 'ignore' });
 
   // ---- the agent connects the drive by itself ----
+  const tStart = Date.now();
   const mounted = await until(async () => !!(await mountLine()), 120000);
   const line = await mountLine();
   mp = line && line.slice(line.indexOf(' on ') + 4, line.lastIndexOf(' ('));
   expect(`the drive is connected: ${line || 'no'}`, mounted && !!mp);
   if (!mp) throw new Error('not mounted; agent log:\n' + log());
+  const tMount = Date.now();
   const top = await readdir(mp);
+  const tList = Date.now();
+  results.push(`info connected ${((tMount - tStart) / 1000).toFixed(1)} s after the app started (${clock(tMount)}); the first listing took ${((tList - tMount) / 1000).toFixed(1)} s (until ${clock(tList)})`);
   expect(`it shows the places from the website: ${top.join(', ')}`, top.includes('My files'));
   const my = path.join(mp, 'My files');
 
   // ---- here → website ----
-  const t0 = Date.now(), seen = davLog.length;
+  const t0 = Date.now();
   await writeFile(path.join(my, 'from-mac.txt'), 'typed on a Mac');
   results.push(`info the first write took ${((Date.now() - t0) / 1000).toFixed(1)} s`);
-  console.log('--- WebDAV requests of the first write:\n' + davLog.slice(seen).join('\n'));
+  console.log(`--- requests from the start to the first write (app started ${clock(tStart)}):\n` + davLog.join('\n'));
+  console.log('--- agent log:\n' + log());
+  console.log('--- macOS log around connecting:\n' + await run('sh', ['-c', `log show --start "$(date -r ${Math.floor(tStart / 1000)} '+%Y-%m-%d %H:%M:%S')" --style compact --info --predicate 'process CONTAINS[c] "webdav" OR process CONTAINS[c] "NetAuth" OR subsystem CONTAINS[c] "netfs" OR eventMessage CONTAINS[c] "webdav"' | head -300`], { maxBuffer: 64 << 20, timeout: 60000 }).then(r => r.stdout + r.stderr, e => e.message));
   let madeId;
   expect('a file made on the drive is on the website', await until(async () => { const n = await child(home, 'from-mac.txt'); madeId = n?.id; return n && (await content(n.id)) === 'typed on a Mac'; }));
   await mkdir(path.join(my, 'Mac folder'));

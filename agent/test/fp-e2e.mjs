@@ -91,7 +91,15 @@ const storage = path.join(os.homedir(), 'Library', 'CloudStorage');
 // A person switches the provider on in System Settings (the app opens the place); here a script clicks the switch as
 // a person would, through the accessibility interface. It prints what it sees, so a changed System Settings layout
 // shows up in the log. RESULT is CLICKED, ALREADY ON, OPENED (it opened the File Providers list; run again) or empty.
-const CLICK = `on run
+const CLICK = `on str(x)
+  try
+    if x is missing value then return "-"
+    return x as text
+  on error m
+    return "(" & m & ")"
+  end try
+end str
+on run
   set out to {}
   set found to false
   set acted to ""
@@ -101,19 +109,28 @@ const CLICK = `on run
       set frontmost to true
       repeat with w in windows
         set end of out to "WINDOW"
-        repeat with e in (entire contents of w)
+        set els to {}
+        try
+          set els to entire contents of w
+        on error m
+          set end of out to "ERR entire contents: " & m
+        end try
+        repeat with i from 1 to count of els
+          set e to item i of els
           set {r, n, d, v} to {"", "", "", ""}
           try
-            set r to role of e as text
+            set r to my str(role of e)
+          on error m
+            set r to "ERR " & m
           end try
           try
-            set n to name of e as text
+            set n to my str(name of e)
           end try
           try
-            set d to description of e as text
+            set d to my str(description of e)
           end try
           try
-            set v to value of e as text
+            set v to my str(value of e)
           end try
           set end of out to r & " | " & n & " | " & d & " | " & v
           if n contains "Company Files" or d contains "Company Files" or v contains "Company Files" then set found to true
