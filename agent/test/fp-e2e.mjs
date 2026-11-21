@@ -93,7 +93,7 @@ try {
   root = root && path.join(storage, root);
   expect(`Company Files is in Finder's cloud storage: ${root || 'no'}`, found);
   if (!root) throw new Error('no File Provider folder; agent log:\n' + log());
-  const timed = (what, p) => Promise.race([p, sleep(25000).then(() => { throw new Error(`${what} took over 25 s (no answer)`); })]);
+  const timed = (what, p, ms = 25000) => Promise.race([p, sleep(ms).then(() => { throw new Error(`${what} took over ${ms / 1000} s (no answer)`); })]);
 
   // macOS keeps a new provider off until a person switches it on in System Settings (File Providers), and no program
   // can do it: on a test machine it stays off. Meanwhile the app connects the network drive, which must work.
@@ -105,7 +105,10 @@ try {
     expect(`meanwhile the network drive is connected: ${line || 'no'}`, drive);
     if (!drive) throw new Error('no network drive either; agent log:\n' + log());
     const mp = line.slice(line.indexOf(' on ') + 4, line.lastIndexOf(' ('));
-    await timed('writing on the drive', writeFile(path.join(mp, 'My files', 'via-drive.txt'), 'made on the drive'));
+    // the first write through macOS's WebDAV client can be slow (it locks, writes an empty file, then the content)
+    const t0 = Date.now();
+    await timed('writing on the drive', writeFile(path.join(mp, 'My files', 'via-drive.txt'), 'made on the drive'), 120000);
+    results.push(`info writing on the drive took ${((Date.now() - t0) / 1000).toFixed(1)} s`);
     expect('a file made on the network drive reaches the website', await until(async () => { const n = await child(home, 'via-drive.txt'); return n && (await content(n.id)) === 'made on the drive'; }));
     expect('a file from the website opens on the network drive', await until(async () => (await readFile(path.join(mp, 'My files', 'before.txt'), 'utf8')) === 'there before the Mac connected'));
     throw Object.assign(new Error('done'), { done: true }); // the provider itself needs a person; nothing more to check here
