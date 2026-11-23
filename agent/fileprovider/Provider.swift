@@ -53,7 +53,7 @@ final class API {
         return URLSession(configuration: c)
     }()
 
-    private static var group: String { Bundle.main.object(forInfoDictionaryKey: "CompanyFilesAppGroup") as? String ?? "" }
+    static var group: String { Bundle.main.object(forInfoDictionaryKey: "CompanyFilesAppGroup") as? String ?? "" }
 
     // "provider-ok" in the shared folder: the app checks it to know this extension really works (else it falls back
     // to the network drive). Written at most once a minute.
@@ -170,6 +170,83 @@ func fpError(_ e: Error) -> Error {
     return e
 }
 
+// MARK: - kept on this Mac
+
+// "Always Keep on This Device" and "Free Up Space", as on Windows. The ids kept are in the shared folder
+// (pins.json). A kept item, and everything inside a kept folder, is downloaded at once, kept current and never
+// removed by the system (macOS 15: its content policy; earlier: downloaded once when kept). A change is told to the
+// system through the working set (pending), so Finder's menu and badges follow.
+final class Pins {
+    static let shared = Pins()
+    private let lock = NSLock()
+    private var ids: Set<Int64>?
+    private var pending = Set<Int64>()
+    private var dir: URL? { FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: API.group) }
+
+    private func load() -> Set<Int64> { // with the lock held
+        if let ids { return ids }
+        let read = dir.flatMap { try? JSONDecoder().decode([Int64].self, from: Data(contentsOf: $0.appendingPathComponent("pins.json"))) } ?? []
+        ids = Set(read)
+        return ids!
+    }
+
+    func contains(_ id: Int64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return load().contains(id)
+    }
+
+    func set(_ changed: [Int64], keep: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        var s = load()
+        for id in changed { if keep { s.insert(id) } else { s.remove(id) } }
+        ids = s
+        pending.formUnion(changed)
+        if let d = dir { try? JSONEncoder().encode(s.sorted()).write(to: d.appendingPathComponent("pins.json"), options: .atomic) }
+    }
+
+    func takePending() -> [Int64] {
+        lock.lock(); defer { lock.unlock() }
+        defer { pending.removeAll() }
+        return Array(pending)
+    }
+
+    // The same two commands asked by the app (`CompanyFiles fp-keep|fp-free <id>…`, used by the tests): requests.json
+    // in the shared folder, taken once.
+    func takeRequests() -> [(id: Int64, keep: Bool)] {
+        struct Request: Decodable { let id: Int64; let keep: Bool }
+        guard let file = dir?.appendingPathComponent("requests.json"), let data = try? Data(contentsOf: file) else { return [] }
+        try? FileManager.default.removeItem(at: file)
+        return ((try? JSONDecoder().decode([Request].self, from: data)) ?? []).map { ($0.id, $0.keep) }
+    }
+}
+
+// Keep (download now, never remove) or free up space (remove the download; the file stays on the website).
+func setKeep(_ domain: NSFileProviderDomain, _ ids: [Int64], keep: Bool) async {
+    guard !ids.isEmpty, let m = NSFileProviderManager(for: domain) else { return }
+    Pins.shared.set(ids, keep: keep)
+    logger.notice("\(keep ? "keep" : "free up", privacy: .public) \(ids.count) item(s)")
+    try? await m.signalEnumerator(for: .workingSet) // the system learns the new state: menu, badge, content policy
+    for id in ids {
+        if keep {
+            if #available(macOS 15.0, *) { continue } // the content policy has the system download it and keep it
+            if #available(macOS 14.0, *) {
+                try? await m.requestDownloadForItem(withIdentifier: identifier(id), requestedRange: NSRange(location: NSNotFound, length: 0))
+            }
+        } else {
+            // A kept item cannot be removed until the system has its new policy: a few tries.
+            for attempt in 1...5 {
+                do {
+                    try await m.evictItem(identifier: identifier(id))
+                    break
+                } catch {
+                    if attempt == 5 { logger.error("free up \(id): \(String(describing: error), privacy: .public)") }
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - items
 
 func identifier(_ id: Int64) -> NSFileProviderItemIdentifier { NSFileProviderItemIdentifier("n\(id)") }
@@ -184,10 +261,12 @@ func localOnly(_ name: String) -> Bool { name.hasPrefix(".") || name.hasPrefix("
 final class Item: NSObject, NSFileProviderItem {
     let e: Entry
     let parent: NSFileProviderItemIdentifier
+    let kept: Bool
 
     init(_ e: Entry, parent: NSFileProviderItemIdentifier) {
         self.e = e
         self.parent = parent
+        self.kept = Pins.shared.contains(e.id)
     }
 
     convenience init(_ e: Entry) { // with the parent the server gave (0 = the top level)
@@ -203,10 +282,15 @@ final class Item: NSObject, NSFileProviderItem {
     var creationDate: Date? { Date(timeIntervalSince1970: e.created / 1000) }
     var itemVersion: NSFileProviderItemVersion {
         NSFileProviderItemVersion(contentVersion: Data((e.dir ? "dir" : e.v).utf8),
-                                  metadataVersion: Data("\(e.name)|\(parent.rawValue)|\(e.modified)|\(e.readOnly)".utf8))
+                                  metadataVersion: Data("\(e.name)|\(parent.rawValue)|\(e.modified)|\(e.readOnly)|\(kept)".utf8))
     }
+    // Finder's menu shows "Always Keep on This Device" for items not kept (Info.plist activation rule).
+    var userInfo: [AnyHashable: Any]? { kept ? ["keep": true] : nil }
+    @available(macOS 15.0, *)
+    var contentPolicy: NSFileProviderContentPolicy { kept ? .downloadEagerlyAndKeepDownloaded : .inherited }
     var capabilities: NSFileProviderItemCapabilities {
-        var c: NSFileProviderItemCapabilities = e.dir ? [.allowsReading, .allowsContentEnumerating] : [.allowsReading]
+        // allowsEvicting: the download can be removed (Finder's "Remove Download", "Free Up Space")
+        var c: NSFileProviderItemCapabilities = e.dir ? [.allowsReading, .allowsContentEnumerating, .allowsEvicting] : [.allowsReading, .allowsEvicting]
         if !e.readOnly {
             c.insert(e.dir ? .allowsAddingSubItems : .allowsWriting)
             if parent != .rootContainer { c.formUnion([.allowsRenaming, .allowsReparenting, .allowsDeleting]) } // the places stay
@@ -351,7 +435,21 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     }
 
     func enumerator(for containerItemIdentifier: NSFileProviderItemIdentifier, request: NSFileProviderRequest) throws -> NSFileProviderEnumerator {
-        Enumerator(containerItemIdentifier)
+        Enumerator(containerItemIdentifier, domain: domain)
+    }
+}
+
+// Finder's "Always Keep on This Device" and "Free Up Space" (declared in Info.plist: NSExtensionFileProviderActions).
+extension FileProviderExtension: NSFileProviderCustomAction {
+    func performAction(identifier actionIdentifier: NSFileProviderExtensionActionIdentifier, onItemsWithIdentifiers itemIdentifiers: [NSFileProviderItemIdentifier],
+                       completionHandler: @escaping (Error?) -> Void) -> Progress {
+        let keep = actionIdentifier.rawValue == "com.companyfiles.keep"
+        let ids = itemIdentifiers.compactMap(nodeID) // the root is neither kept nor freed
+        Task {
+            await setKeep(domain, ids, keep: keep)
+            completionHandler(nil)
+        }
+        return Progress()
     }
 }
 
@@ -359,9 +457,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
 final class Enumerator: NSObject, NSFileProviderEnumerator {
     let container: NSFileProviderItemIdentifier
+    let domain: NSFileProviderDomain
     let api = API.shared
 
-    init(_ container: NSFileProviderItemIdentifier) { self.container = container }
+    init(_ container: NSFileProviderItemIdentifier, domain: NSFileProviderDomain) {
+        self.container = container
+        self.domain = domain
+    }
 
     func invalidate() {}
 
@@ -386,13 +488,28 @@ final class Enumerator: NSObject, NSFileProviderEnumerator {
     func enumerateChanges(for observer: NSFileProviderChangeObserver, from anchor: NSFileProviderSyncAnchor) {
         Task {
             guard container == .workingSet else { return observer.finishEnumeratingChanges(upTo: anchor, moreComing: false) }
+            // keep / free up asked by the app: handled apart (it signals again, and its items come then)
+            let asked = Pins.shared.takeRequests()
+            if !asked.isEmpty {
+                let domain = self.domain
+                Task {
+                    await setKeep(domain, asked.filter { $0.keep }.map { $0.id }, keep: true)
+                    await setKeep(domain, asked.filter { !$0.keep }.map { $0.id }, keep: false)
+                }
+            }
             do {
-                let since = Int64(String(decoding: anchor.rawValue, as: UTF8.self)) ?? 0
+                // the anchor is "<change log point>" or, after a keep/free-up here, "<point>.<time>" (always new)
+                let since = Int64(String(decoding: anchor.rawValue, as: UTF8.self).split(separator: ".").first ?? "") ?? 0
                 let ch = try await api.changes(since: since)
                 if ch.reset == true { return observer.finishEnumeratingWithError(NSFileProviderError(.syncAnchorExpired)) }
-                if let items = ch.items, !items.isEmpty { observer.didUpdate(items.map { Item($0) }) }
+                var items = (ch.items ?? []).map { Item($0) }
+                // kept or freed up here since the last look: as they are now, with their new state
+                let changedHere = Pins.shared.takePending().filter { id in !items.contains { $0.e.id == id } }
+                for id in changedHere { if let e = try? await api.info(id) { items.append(Item(e)) } }
+                if !items.isEmpty { observer.didUpdate(items) }
                 if let gone = ch.deleted, !gone.isEmpty { observer.didDeleteItems(withIdentifiers: gone.map(identifier)) }
-                observer.finishEnumeratingChanges(upTo: NSFileProviderSyncAnchor(Data(String(ch.anchor).utf8)), moreComing: ch.more == true)
+                let point = changedHere.isEmpty ? "\(ch.anchor)" : "\(ch.anchor).\(Int64(Date().timeIntervalSince1970 * 1000))"
+                observer.finishEnumeratingChanges(upTo: NSFileProviderSyncAnchor(Data(point.utf8)), moreComing: ch.more == true)
             } catch {
                 observer.finishEnumeratingWithError(fpError(error))
             }

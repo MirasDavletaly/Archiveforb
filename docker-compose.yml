@@ -69,6 +69,10 @@ services:
       PORT: "8800"
       TRUST_PROXY: "1"
       PUBLIC_URL: ${PUBLIC_URL:?Set PUBLIC_URL=https://files.<tailnet>.ts.net in .env}
+      # The public entrance on the VPS (Caddy passes the site on over the tailnet): its addresses, and its tailnet
+      # IP, the only source believed about the visitor's own IP (X-Relay-Client-IP). Empty: Funnel only.
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+      RELAY_IPS: ${RELAY_IPS:-}
       APP_NAME: ${APP_NAME:-Company Files}
       DATA_DIR: /data
       BACKUP_DIR: /backup

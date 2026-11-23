@@ -23,7 +23,7 @@ import (
 )
 
 var (
-	version       = "1.5.1"
+	version       = "1.5.2"
 	defaultServer = "" // -ldflags "-X main.defaultServer=https://files.example.ts.net"
 	appName       = "Company Files"
 	linkScheme    = "myfiles"
@@ -50,6 +50,8 @@ func main() {
 		os.Exit(cliPair(dir, args[1:]))
 	case "sync":
 		os.Exit(cliSync(dir))
+	case "fp-keep", "fp-free": // Mac: Finder's "Always Keep on This Device" / "Free Up Space" for website ids (tests)
+		os.Exit(cliKeep(cmd == "fp-keep", args[1:]))
 	case "status":
 		c := loadConfig(dir)
 		fmt.Printf("server: %s\nconnected as: %s\nfolder: %s\nhidden: %v\n", c.Server, c.User, c.folder(), c.Hidden)

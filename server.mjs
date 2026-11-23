@@ -2,6 +2,7 @@ import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
 import os from 'node:os';
+import net from 'node:net';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { Readable, Transform } from 'node:stream';
@@ -169,7 +170,12 @@ export function createApp(cfg = loadConfig()) {
   // Proxy headers are believed only from a proxy on this machine (Tailscale Serve, Caddy).
   // The last X-Forwarded-For entry is the one that proxy added; proxies that append (nginx) keep whatever the client sent in front.
   const viaProxy = req => cfg.trustProxy && /^(127\.|::1$|::ffff:127\.)/.test(req.socket.remoteAddress || '');
-  const clientIp = req => (viaProxy(req) && String(req.headers['x-forwarded-for'] || '').split(',').pop().trim()) || req.socket.remoteAddress || '';
+  const clientIp = req => {
+    const ip = (viaProxy(req) && String(req.headers['x-forwarded-for'] || '').split(',').pop().trim()) || req.socket.remoteAddress || '';
+    // Through the VPS entrance the nearest hop is the VPS itself; it says whose request it passes on.
+    const relayed = cfg.relayIps.includes(ip) && String(req.headers['x-relay-client-ip'] || '').trim();
+    return relayed && net.isIP(relayed) ? relayed : ip;
+  };
 
   // Per-IP limits: an IPv6 client controls a whole /64, so the /64 is what gets counted.
   const ipKey = ip => {
@@ -507,13 +513,14 @@ export function createApp(cfg = loadConfig()) {
   // =====================================================================
   // Sign-in
   // =====================================================================
-  add('GET', '/api/me', 'optional', c => ({
+  const meOf = c => ({
     appName: cfg.appName,
     office: !!cfg.officeUrl,
     pdfEdit: !!(cfg.officeUrl && cfg.pdfConverter),
     stage: c.stage ?? null,
     user: c.user ? { id: c.user.id, login: c.user.login, name: c.user.name, admin: !!c.user.is_admin, manager: isManager(c.user) } : null,
-  }));
+  });
+  add('GET', '/api/me', 'optional', meOf);
 
   add('POST', '/api/login', 'public', async c => {
     const b = await body(c);
@@ -3018,6 +3025,23 @@ export function createApp(cfg = loadConfig()) {
     // The page asks for its scripts and styles by version (?v=), so those never need checking again: a repeat visit
     // downloads nothing but the page itself, instead of asking about each file.
     const page = rel === STATIC['/'] && startPage();
+    if (page && p === '/') {
+      // The start page carries who is signed in and their places (what /api/me and /api/spaces answer), so opening
+      // the site takes one round trip instead of three: over the internet each one is 0.4-2 s. Arriving from a link
+      // on another site, the browser holds back the session cookie (SameSite=Strict): then, unless it was sent, the
+      // page is told nothing and asks, as before.
+      let boot = null;
+      try {
+        const c = { req, ip: clientIp(req), user: null };
+        authenticate(c, 'optional');
+        const cookieSure = ['none', 'same-origin'].includes(req.headers['sec-fetch-site']);
+        if (c.user || cookieSure) boot = { me: meOf(c), spaces: c.user && c.stage === 'full' && !c.user.is_admin ? acl.spaces(c.ctx) : null };
+      } catch {}
+      const html = Buffer.from(page[''].buf.toString().replace('</head>', `<script type="application/json" id="boot">${JSON.stringify(boot).replace(/</g, '\\u003c')}</script>\n</head>`));
+      const out = enc === 'br' ? zlib.brotliCompressSync(html, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 } }) : enc === 'gzip' ? zlib.gzipSync(html) : html;
+      res.writeHead(200, { 'Content-Type': TYPES['.html'], 'Cache-Control': 'private, no-cache', Vary: 'Accept-Encoding, Cookie', 'Content-Length': out.length, ...(enc && { 'Content-Encoding': enc }) });
+      return res.end(req.method === 'HEAD' ? undefined : out);
+    }
     const packed = enc && (page ? page[enc] : load(enc === 'br' ? '.br' : '.gz'));
     const file = packed || (page ? page[''] : load(''));
     const pinned = VERSIONED.includes(p) && new URL(req.url, 'http://x').searchParams.get('v') === version(p);

@@ -11,3 +11,5 @@ func (s *Syncer) runFileProvider(<-chan struct{}) {}
 func fpOpen(*App) {}
 
 func fpTeardown(Config) {}
+
+func cliKeep(bool, []string) int { return 2 }

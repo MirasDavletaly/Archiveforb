@@ -27,6 +27,9 @@ export function loadConfig(env = process.env) {
     tlsCert: env.TLS_CERT || null,
     tlsKey: env.TLS_KEY || null,
     trustProxy: env.TRUST_PROXY === '1',
+    // Tailnet addresses of the public entrance on the VPS (Caddy): only requests from these may say, in
+    // X-Relay-Client-IP, whose request they pass on.
+    relayIps: (env.RELAY_IPS || '').split(',').map(s => s.trim()).filter(Boolean),
     appName: env.APP_NAME || 'Company Files',
     // Where the agent installers are downloaded from instead of this server (a better-connected one: the NAS's
     // internet upload is slow). /downloads/<installer> then redirects there. Unset: served from here.

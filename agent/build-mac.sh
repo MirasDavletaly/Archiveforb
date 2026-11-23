@@ -96,6 +96,9 @@ EOF
 # ---- the File Provider extension (signed builds only) ----
 if [ -n "$GROUP" ]; then
   mkdir -p "$APPEX/Contents/MacOS"
+  # which macOS the File Provider calls used here need (from the SDK's own headers), for the build log
+  grep -hE 'contentPolicy|NSFileProviderContentPolicy\b|AllowsEvicting|requestDownloadForItem|evictItemWithIdentifier|protocol NSFileProviderCustomAction|performActionWithIdentifier' \
+    "$(xcrun --show-sdk-path)"/System/Library/Frameworks/FileProvider.framework/Headers/*.h | sed 's/^[[:space:]]*/  sdk: /' | head -20 || true
   for arch in arm64 x86_64; do
     xcrun swiftc -swift-version 5 -O -target "$arch-apple-macos12.0" -parse-as-library -application-extension \
       -module-name CompanyFilesProvider -Xlinker -application_extension -Xlinker -e -Xlinker _NSExtensionMain \
@@ -125,10 +128,25 @@ if [ -n "$GROUP" ]; then
     <key>NSExtensionPrincipalClass</key><string>CFFileProviderExtension</string>
     <key>NSExtensionFileProviderDocumentGroup</key><string>$GROUP</string>
     <key>NSExtensionFileProviderSupportsEnumeration</key><true/>
+    <key>NSExtensionFileProviderActions</key>
+    <array>
+      <dict>
+        <key>NSExtensionFileProviderActionIdentifier</key><string>com.companyfiles.keep</string>
+        <key>NSExtensionFileProviderActionName</key><string>Always Keep on This Device</string>
+        <key>NSExtensionFileProviderActionActivationRule</key>
+        <string>SUBQUERY ( fileproviderItems, \$item, \$item.userInfo.keep == nil ).@count &gt; 0</string>
+      </dict>
+      <dict>
+        <key>NSExtensionFileProviderActionIdentifier</key><string>com.companyfiles.free</string>
+        <key>NSExtensionFileProviderActionName</key><string>Free Up Space</string>
+        <key>NSExtensionFileProviderActionActivationRule</key><string>TRUEPREDICATE</string>
+      </dict>
+    </array>
   </dict>
 </dict>
 </plist>
 EOF
+  plutil -lint "$APPEX/Contents/Info.plist"
   cat > "$TMP/provider.entitlements" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -257,11 +257,18 @@ document.addEventListener('keydown', e => {
 addEventListener('resize', closeMenu);
 
 // ---------------------------------------------------------------- session and routing
-async function refreshMe() {
-  const me = await api('GET', '/api/me');
+// The server puts who is signed in and their places into the start page (saves two round trips); read once.
+const BOOT = (() => {
+  const el = document.getElementById('boot');
+  el?.remove();
+  try { return el && JSON.parse(el.textContent); } catch { return null; }
+})();
+
+async function refreshMe(boot = null) {
+  const me = boot?.me || await api('GET', '/api/me'); // none when the browser may have held back the session cookie
   Object.assign(state, { appName: me.appName, me: me.user, stage: me.stage, office: me.office, pdfEdit: me.pdfEdit });
   document.title = state.appName;
-  state.spaces = state.me && state.stage === 'full' && !state.me.admin ? await api('GET', '/api/spaces') : [];
+  state.spaces = state.me && state.stage === 'full' && !state.me.admin ? boot?.spaces || await api('GET', '/api/spaces') : [];
 }
 
 async function logout() {
@@ -311,7 +318,7 @@ addEventListener('hashchange', () => route());
   try {
     if (location.pathname.startsWith('/s/')) return await renderShare(location.pathname.slice(3));
     if (location.pathname.startsWith('/join/')) return await renderJoin(location.pathname.slice(6));
-    await refreshMe();
+    await refreshMe(BOOT);
     await route();
   } catch (e) {
     document.body.className = 'gate';

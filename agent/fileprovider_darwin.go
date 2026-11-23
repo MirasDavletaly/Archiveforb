@@ -24,10 +24,12 @@ import "C"
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"time"
 	"unsafe"
 )
@@ -226,6 +228,40 @@ func fpOpen(a *App) {
 		return
 	}
 	openPath(root)
+}
+
+// cliKeep: what Finder's "Always Keep on This Device" (keep) and "Free Up Space" do, for website ids; the tests use
+// it. The request goes to the extension through the shared folder, and the system is told to look.
+func cliKeep(keep bool, ids []string) int {
+	dir, err := groupDir()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	reqs := []map[string]any{}
+	for _, s := range ids {
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "not an id:", s)
+			return 2
+		}
+		reqs = append(reqs, map[string]any{"id": n, "keep": keep})
+	}
+	b, _ := json.Marshal(reqs)
+	tmp := filepath.Join(dir, "requests.json.tmp")
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if err := os.Rename(tmp, filepath.Join(dir, "requests.json")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	id := cstr(fpDomain)
+	defer C.free(unsafe.Pointer(id))
+	C.cfFPSignal(id, id)        // the name is not used for signalling
+	time.Sleep(2 * time.Second) // the signal is sent asynchronously: do not quit before it is out
+	return 0
 }
 
 // fpTeardown removes the provider (this computer was disconnected, or the program removed); the token is forgotten.

@@ -338,6 +338,31 @@ try {
   const page = await fetch(base + '/');
   assert.match(page.headers.get('content-security-policy'), /default-src 'self'/);
   assert.equal(page.headers.get('cross-origin-resource-policy'), 'same-origin');
+  // The start page carries who is signed in and their places (two round trips fewer), safely escaped.
+  const pageOf = async (c, site) => (await c.req('GET', '/', { headers: site ? { 'sec-fetch-site': site } : {} })).data.toString();
+  const bootOf = html => JSON.parse(/<script type="application\/json" id="boot">(.*?)<\/script>/s.exec(html)[1]);
+  const hb = bootOf(await pageOf(H));
+  assert.equal(hb.me.user.id, ok(await H.get('/api/me')).user.id);
+  assert.deepEqual(hb.spaces, ok(await H.get('/api/spaces')));
+  assert.equal(bootOf(await pageOf(new Client(), 'none')).me.user, null, 'typed in or a bookmark without a session: not signed in, no extra request');
+  assert.equal(bootOf(await pageOf(new Client(), 'cross-site')), null, 'from a link on another site the cookie may be held back: the page asks');
+  const realName = app.db.get('SELECT name FROM users WHERE id = ?', hb.me.user.id).name;
+  app.db.run('UPDATE users SET name = ? WHERE id = ?', '</script><img src=x onerror=alert(1)>', hb.me.user.id);
+  const evil = await pageOf(H);
+  assert.ok(!evil.includes('</script><img'), 'a name cannot end the data block');
+  assert.equal(bootOf(evil).me.user.name, '</script><img src=x onerror=alert(1)>');
+  app.db.run('UPDATE users SET name = ? WHERE id = ?', realName, hb.me.user.id);
+  // Through the VPS entrance: the visitor's IP comes from the VPS's header, and only from the VPS.
+  Object.assign(cfg, { trustProxy: true, relayIps: ['100.64.0.9'] });
+  const failedFrom = async (xff, claimed) => {
+    const login = 'relay-' + crypto.randomBytes(4).toString('hex');
+    await fetch(base + '/api/login', { method: 'POST', headers: { 'x-requested-with': 'fetch', 'content-type': 'application/json', 'x-forwarded-for': xff, 'x-relay-client-ip': claimed }, body: JSON.stringify({ login, password: 'x' }) });
+    return app.db.get('SELECT ip FROM audit WHERE target = ? ORDER BY id DESC', login)?.ip;
+  };
+  assert.equal(await failedFrom('100.64.0.9', '203.0.113.7'), '203.0.113.7', 'the VPS says whose request it passes on');
+  assert.equal(await failedFrom('198.51.100.4', '203.0.113.7'), '198.51.100.4', 'anyone else saying so is ignored');
+  assert.equal(await failedFrom('100.64.0.9', 'not an address'), '100.64.0.9', 'nonsense is ignored');
+  Object.assign(cfg, { trustProxy: false, relayIps: [] });
   assert.equal(await rawRequest('/api/me', { host: 'evil.example' }), 421);
   assert.equal(await rawRequest('/api/me', { host: `127.0.0.1:${server.address().port}` }), 200);
   const minFree = cfg.minFree;

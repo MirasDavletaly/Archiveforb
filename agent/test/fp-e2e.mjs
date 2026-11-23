@@ -264,6 +264,23 @@ try {
   await U.req('DELETE', `/api/nodes/${siteId}`);
   expect('deleted on the website: gone here', await until(async () => !(await readdir(my)).includes('renamed on site.txt'), 90000));
 
+  // ---- on this Mac or only in the cloud (Finder's menu, as on Windows) ----
+  const flags = async f => (await run('ls', ['-lO', f])).stdout.trim(); // "dataless": only in the cloud
+  const local = async f => !/dataless/.test(await flags(f));
+  const before = path.join(my, 'before.txt');
+  expect(`an opened file stays on this Mac, not downloaded again each time (${await flags(before)})`, await local(before));
+  await U.req('PUT', `/api/nodes/${home}/files?name=${encodeURIComponent('keep-me.txt')}`, { raw: Buffer.from('kept on the Mac') });
+  const kept = path.join(my, 'keep-me.txt');
+  expect('a new file from the website shows up, only in the cloud until opened', await until(async () => (await readdir(my)).includes('keep-me.txt') && !(await local(kept)), 90000));
+  const keptId = (await child(home, 'keep-me.txt')).id;
+  await run(EXE, ['fp-keep', String(keptId)], { timeout: 30000 });
+  expect('"Always Keep on This Device": it comes down without being opened', await until(() => local(kept), 90000));
+  await sleep(15000);
+  expect(`... and stays (${await flags(kept)})`, await local(kept));
+  await run(EXE, ['fp-free', String(keptId)], { timeout: 30000 });
+  expect('"Free Up Space": the download goes, the file stays in the folder', await until(async () => !(await local(kept)) && (await readdir(my)).includes('keep-me.txt'), 90000));
+  expect('... and opens again when wanted', await until(async () => (await readFile(kept, 'utf8')) === 'kept on the Mac'));
+
   // ---- deleting here ----
   await timed('deleting', unlink(path.join(my, 'Mac folder', 'renamed.txt')));
   expect('deleted here: in the website trash', await until(async () => (await U.req('GET', '/api/trash')).some(t => t.id === madeId)));
