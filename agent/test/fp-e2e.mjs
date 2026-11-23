@@ -17,7 +17,8 @@ const { createApp } = await import(APP + 'server.mjs');
 const { loadConfig } = await import(APP + 'src/config.mjs');
 const { hashPassword } = await import(APP + 'src/auth.mjs');
 const W = fs.mkdtempSync(path.join(process.env.WORK || os.tmpdir(), 'fp-e2e-'));
-const CFG = path.join(W, 'config');
+// the app's own settings folder (a fresh CI machine): started at login without --config, it finds the same settings
+const CFG = path.join(os.homedir(), 'Library', 'Application Support', 'CompanyFiles');
 const SECURE = 8846, PLAIN = 8847;
 const key = path.join(W, 'key.pem'), cert = path.join(W, 'cert.pem');
 await run('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '2', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost']);
@@ -284,6 +285,29 @@ try {
   // ---- deleting here ----
   await timed('deleting', unlink(path.join(my, 'Mac folder', 'renamed.txt')));
   expect('deleted here: in the website trash', await until(async () => (await U.req('GET', '/api/trash')).some(t => t.id === madeId)));
+
+  // ---- switched off and on again: macOS starts it at login (its LaunchAgent), with no network for a minute ----
+  agent.kill(); // as when the laptop is switched off
+  await sleep(2000);
+  const cfgFile2 = path.join(CFG, 'agent.json');
+  fs.writeFileSync(cfgFile2, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile2, 'utf8')), initialized: false, fp_asked: true }));
+  const firstStart = spawn(EXE, ['--background'], { stdio: 'ignore' }); // opened for the first time: sets up starting with the computer
+  const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.companyfiles.agent.plist');
+  expect('the first start sets up starting with the computer (its LaunchAgent)', await until(async () => fs.existsSync(plist) && /RunAtLoad/.test(fs.readFileSync(plist, 'utf8')), 30000));
+  firstStart.kill();
+  await sleep(2000);
+  servers[0].close(); // no network at login: the Wi-Fi is not up yet
+  servers[0].closeAllConnections();
+  await run('launchctl', ['setenv', 'COMPANYFILES_FP_WAIT', '45s']); // the provider's test wait, shorter than the time offline
+  const logMark = log().length;
+  await run('launchctl', ['bootstrap', `gui/${process.getuid()}`, plist]);
+  await sleep(60000);
+  await new Promise(r => servers[0].listen(SECURE, r));
+  const since = () => log().slice(logMark);
+  expect('after switching on it started by itself, on the same account, with no new connecting', await until(async () => /is in Finder/.test(since()), 240000));
+  expect('a minute offline at login did not switch it to the network drive', !/using the network drive instead/.test(since()));
+  await U.req('PUT', `/api/nodes/${home}/files?name=${encodeURIComponent('after-restart.txt')}`, { raw: Buffer.from('after a restart') });
+  expect('files from the website keep arriving in Finder', await until(async () => (await readFile(path.join(my, 'after-restart.txt'), 'utf8')) === 'after a restart', 120000));
 } catch (e) {
   if (!e.done) results.push('FAIL ' + e.stack);
 } finally {
@@ -293,6 +317,7 @@ try {
     results.push(`${mounted ? 'ok  ' : 'FAIL'} fallback: the app switched to the network drive by itself`);
   }
   if (agent && agent.exitCode === null) agent.kill();
+  await run('launchctl', ['bootout', `gui/${process.getuid()}/com.companyfiles.agent`]).catch(() => {}); // the one started "at login"
   const failed = results.some(r => r.startsWith('FAIL'));
   console.log(results.join('\n'));
   if (failed) {

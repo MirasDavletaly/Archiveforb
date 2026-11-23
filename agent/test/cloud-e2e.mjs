@@ -150,6 +150,19 @@ try {
   await unlink(path.join(ROOT, 'My files', 'Docs', '~WRL0001.tmp'));
   expect('a Word-style save becomes a new version of the same file (not delete + new)', await until(async () => (await content(report)) === 'report v4 saved by Word' && (await U.req('GET', `/api/nodes/${report}/versions`)).length === versionsBefore + 1 && !(await U.req('GET', '/api/trash')).some(t => t.id === report)));
 
+  // ---- switched off and on again, with no network at first: back by itself, on the same account ----
+  agent.kill(); // as when the laptop is switched off
+  await sleep(1500);
+  server.close();
+  server.closeAllConnections();
+  agent = spawn(EXE, ['--config', CFG, '--headless'], { env, stdio: 'ignore', windowsHide: true });
+  await sleep(20000); // started with no network (the Wi-Fi not up yet)
+  expect('started with no network: still connected to the same account (nothing to connect again)', JSON.parse(fs.readFileSync(cfgFile, 'utf8')).token?.length > 20);
+  await new Promise(r => server.listen(PORT, '127.0.0.1', r));
+  await upload(U, docs, 'After restart.txt', 'after a restart');
+  expect('once the network is there, files from the website arrive again', await until(() => exists(path.join(ROOT, 'My files', 'Docs', 'After restart.txt')), 120000));
+  expect('... and open', (await readFile(path.join(ROOT, 'My files', 'Docs', 'After restart.txt'), 'utf8')) === 'after a restart');
+
   // ---- read only stays read only ----
   const roPath = path.join(ROOT, 'For Pavel', 'read only.txt');
   expect('a read-only file opens', await until(async () => (await readFile(roPath, 'utf8')) === 'look, do not touch'));

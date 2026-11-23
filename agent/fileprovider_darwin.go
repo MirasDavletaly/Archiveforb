@@ -188,18 +188,27 @@ func fpAskEnable(name string) {
 	}
 }
 
-// fpWorking waits up to 5 minutes for the extension's "provider-ok" mark (written when it reaches the website, at
-// most once a minute), asking the system meanwhile to have the extension look for changes, so it does reach the
-// website even when nobody opens the folder. Looking into the folder starts it too where this process may.
+// fpWorking waits for the extension's "provider-ok" mark (written when it reaches the website, at most once a minute),
+// asking the system meanwhile to have the extension look for changes, so it does reach the website even when nobody
+// opens the folder. It gives up after 5 minutes during which this app itself reaches the website: time offline (a
+// laptop just switched on, before its Wi-Fi is up) does not count, so being offline never turns the provider off.
 func fpWorking(cfg Config, start time.Time, root string, stop <-chan struct{}) bool {
 	dir, err := groupDir()
 	if err != nil {
 		return false
 	}
-	deadline := time.Now().Add(5 * time.Minute)
-	for time.Now().Before(deadline) {
+	wait := 5 * time.Minute
+	if d, err := time.ParseDuration(os.Getenv("COMPANYFILES_FP_WAIT")); err == nil {
+		wait = d // tests
+	}
+	api := newAPI(cfg.Server, cfg.Token)
+	online := time.Duration(0)
+	for online < wait {
 		if st, err := os.Stat(filepath.Join(dir, "provider-ok")); err == nil && st.ModTime().After(start.Add(-time.Second)) {
 			return true
+		}
+		if api.call("GET", "/api/agent/cloud-changes", nil, nil) == nil {
+			online += 5 * time.Second
 		}
 		fpSignal(cfg)
 		if root != "" {
