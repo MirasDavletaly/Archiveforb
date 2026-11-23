@@ -625,6 +625,19 @@ try {
   const txt = ok(await PO.upload(home.id, 'notes.txt', 'x')).id;
   assert.equal((await PO.post(`/api/nodes/${txt}/editor`)).status, 400, 'types the editor does not list are refused');
   assert.equal(ok(await PO.get(`/api/nodes/${report}/content`)).toString(), 'v5');
+  // Two people in one editing session: both are sent to the same document (WOPISrc), and Collabora's saves for each
+  // in turn stay one version.
+  ok(await PO.put(`/api/nodes/${report}/access`, { entries: [{ type: 'user', id: friend.id, level: 2 }] }));
+  const ed2 = ok(await PO.post(`/api/nodes/${report}/editor`));
+  const fed = ok(await (await signIn(friend)).post(`/api/nodes/${report}/editor`));
+  assert.equal(fed.url, ed2.url, 'both are sent to the same document, so the editor puts them in one session');
+  ok(await save('co 1', ed2.token));
+  const together = ok(await PO.get(`/api/nodes/${report}/versions`)).length;
+  ok(await save('co 2', fed.token));
+  ok(await save('co 3', ed2.token));
+  ok(await save('co 4', fed.token));
+  assert.equal(ok(await PO.get(`/api/nodes/${report}/content`)).toString(), 'co 4');
+  assert.equal(ok(await PO.get(`/api/nodes/${report}/versions`)).length, together, 'editing together: one version for the session, not one per save');
   // The PDF editor that keeps pages as they are.
   ok(await PO.put(`/api/nodes/${pdf}/access`, { entries: [{ type: 'user', id: friend.id, level: 1 }] }));
   const pv2 = ok(await PO.post(`/api/nodes/${pdf}/pdf-edit`));

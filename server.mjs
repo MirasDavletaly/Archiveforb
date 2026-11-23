@@ -1524,9 +1524,11 @@ export function createApp(cfg = loadConfig()) {
     c.res.end(w.docx);
   });
 
-  // Collabora saves every few minutes while someone edits. One editing run by one person is kept as one version
-  // (the file as it was before they started stays in Versions); a new version starts after 30 minutes.
-  const editRuns = new Map(); // node id -> { uid, blob, since }
+  // Collabora saves every few minutes while someone edits. One editing run is kept as one version (the file as it was
+  // before it started stays in Versions); a new version starts after 30 minutes. People editing together (one shared
+  // session: Collabora saves for each of them in turn, at least every 5 minutes) are one run; someone who edits
+  // after a pause starts their own.
+  const editRuns = new Map(); // node id -> { uid, blob, since, at }
   add('POST', '/api/wopi/files/:id/contents', 'wopi', async c => {
     const r = wopiFile(c);
     if (r.level < EDIT) fail(403, 'You can only view this file.');
@@ -1558,7 +1560,7 @@ export function createApp(cfg = loadConfig()) {
         if (u.disabled || (fresh?.level || 0) < EDIT || fresh.node.is_dir) fail(403, 'You no longer have Edit access to this file.');
         const cur = fresh.node;
         const run = editRuns.get(cur.id);
-        const same = run && run.uid === c.user.id && run.blob === cur.blob && now - run.since < 30 * 60e3;
+        const same = run && run.blob === cur.blob && now - run.since < 30 * 60e3 && (run.uid === c.user.id || now - run.at < 6 * 60e3);
         // PDFs are saved straight into the file; Word, Excel and the like keep one version per editing run.
         const keep = !r.pdf && !same;
         if (keep) db.run('INSERT INTO versions(node_id, blob, size, created_at, created_by) VALUES(?, ?, ?, ?, ?)', cur.id, cur.blob, cur.size, cur.updated_at, cur.updated_by);
@@ -1570,7 +1572,7 @@ export function createApp(cfg = loadConfig()) {
       throw e;
     }
     if (r.pdf) pdfWork.set(r.node.id, { docx, at: now, base: now });
-    editRuns.set(r.node.id, { uid: c.user.id, blob, since: res.since });
+    editRuns.set(r.node.id, { uid: c.user.id, blob, since: res.since, at: now });
     if (res.old) store.remove([res.old]);
     if (res.newRun) {
       if (!r.pdf) trimVersions(r.node.id);
@@ -3044,6 +3046,10 @@ export function createApp(cfg = loadConfig()) {
     }
     const packed = enc && (page ? page[enc] : load(enc === 'br' ? '.br' : '.gz'));
     const file = packed || (page ? page[''] : load(''));
+    if (!file) { // listed but not on disk (a font package not installed): not found, not a crash
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('Not found');
+    }
     const pinned = VERSIONED.includes(p) && new URL(req.url, 'http://x').searchParams.get('v') === version(p);
     const headers = {
       'Content-Type': TYPES[path.extname(rel)],

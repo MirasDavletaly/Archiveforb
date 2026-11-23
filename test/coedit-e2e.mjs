@@ -96,12 +96,9 @@ async function open(s, who) {
   return !!(await until(() => s.eval(`!!(window.app && app.map && app.map._docLayer && document.querySelector('canvas'))`), 120000, 1000));
 }
 const views = s => s.eval(`Object.keys((window.app && app.map && app.map._viewInfo) || {}).length`).catch(() => -1);
-async function type(s, text) {
-  const box = await s.eval(`(() => { const c = [...document.querySelectorAll('canvas')].sort((a, b) => b.width * b.height - a.width * a.height)[0]; const r = c.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + Math.min(r.height / 3, 200) }; })()`);
-  for (const type of ['mousePressed', 'mouseReleased']) await s.send('Input.dispatchMouseEvent', { type, x: box.x, y: box.y, button: 'left', clickCount: 1 });
-  await sleep(800);
-  await s.send('Input.insertText', { text });
-}
+// Each person types in their own view (the editor's insert-text command, as typing does), into the one shared document.
+const type = (s, text) => s.eval(`app.map.sendUnoCommand('.uno:InsertText', { Text: { type: 'string', value: ${JSON.stringify(text)} } })`);
+const modified = s => s.eval(`!!(app.map && (app.map._everModified || (app.map.stateChangeHandler && app.map.stateChangeHandler.getItemValue('.uno:ModifiedStatus') === 'true')))`).catch(() => null);
 
 let failed = false;
 try {
@@ -115,7 +112,8 @@ try {
   await sleep(1500);
   await type(pb, ' Bolat too.');
   await sleep(3000);
-  await pa.eval(`app.map.sendUnoCommand('.uno:Save')`);
+  expect(`each sees the document changed (${await modified(pa)}, ${await modified(pb)})`, (await modified(pa)) && (await modified(pb)));
+  await pa.eval(`typeof app.map.save === 'function' ? app.map.save(true, false) : app.map.sendUnoCommand('.uno:Save')`);
   const saved = await until(async () => (await aida.req('GET', `/api/nodes/${doc}`)).node.updated_at > startedAt, 60000, 1000);
   expect('the document is saved to the website', !!saved);
   const text = (await convert(await aida.req('GET', `/api/nodes/${doc}/content`), 'Notes.docx', 'txt')).toString('utf8');
