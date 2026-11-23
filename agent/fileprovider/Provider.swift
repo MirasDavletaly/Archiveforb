@@ -174,8 +174,8 @@ func fpError(_ e: Error) -> Error {
 
 // "Always Keep on This Device" and "Free Up Space", as on Windows. The ids kept are in the shared folder
 // (pins.json). A kept item, and everything inside a kept folder, is downloaded at once, kept current and never
-// removed by the system (macOS 15: its content policy; earlier: downloaded once when kept). A change is told to the
-// system through the working set (pending), so Finder's menu and badges follow.
+// removed by the system: its content policy (macOS 13 and later; on macOS 12 it is only marked, and downloaded when
+// opened). A change is told to the system through the working set (pending), so Finder's menu and badges follow.
 final class Pins {
     static let shared = Pins()
     private let lock = NSLock()
@@ -226,22 +226,16 @@ func setKeep(_ domain: NSFileProviderDomain, _ ids: [Int64], keep: Bool) async {
     Pins.shared.set(ids, keep: keep)
     logger.notice("\(keep ? "keep" : "free up", privacy: .public) \(ids.count) item(s)")
     try? await m.signalEnumerator(for: .workingSet) // the system learns the new state: menu, badge, content policy
+    guard !keep else { return } // the content policy has the system download it and keep it
     for id in ids {
-        if keep {
-            if #available(macOS 15.0, *) { continue } // the content policy has the system download it and keep it
-            if #available(macOS 14.0, *) {
-                try? await m.requestDownloadForItem(withIdentifier: identifier(id), requestedRange: NSRange(location: NSNotFound, length: 0))
-            }
-        } else {
-            // A kept item cannot be removed until the system has its new policy: a few tries.
-            for attempt in 1...5 {
-                do {
-                    try await m.evictItem(identifier: identifier(id))
-                    break
-                } catch {
-                    if attempt == 5 { logger.error("free up \(id): \(String(describing: error), privacy: .public)") }
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                }
+        // A kept item cannot be removed until the system has its new policy: a few tries.
+        for attempt in 1...5 {
+            do {
+                try await m.evictItem(identifier: identifier(id))
+                break
+            } catch {
+                if attempt == 5 { logger.error("free up \(id): \(String(describing: error), privacy: .public)") }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
         }
     }
@@ -286,10 +280,11 @@ final class Item: NSObject, NSFileProviderItem {
     }
     // Finder's menu shows "Always Keep on This Device" for items not kept (Info.plist activation rule).
     var userInfo: [AnyHashable: Any]? { kept ? ["keep": true] : nil }
-    @available(macOS 15.0, *)
+    @available(macOS 13.0, *)
     var contentPolicy: NSFileProviderContentPolicy { kept ? .downloadEagerlyAndKeepDownloaded : .inherited }
     var capabilities: NSFileProviderItemCapabilities {
-        // allowsEvicting: the download can be removed (Finder's "Remove Download", "Free Up Space")
+        // allowsEvicting: the download can be removed (Finder's "Remove Download", "Free Up Space"); macOS 12 needs
+        // it, later versions go by the content policy
         var c: NSFileProviderItemCapabilities = e.dir ? [.allowsReading, .allowsContentEnumerating, .allowsEvicting] : [.allowsReading, .allowsEvicting]
         if !e.readOnly {
             c.insert(e.dir ? .allowsAddingSubItems : .allowsWriting)
