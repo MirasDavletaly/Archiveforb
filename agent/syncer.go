@@ -125,6 +125,14 @@ func (s *Syncer) socket(ctx context.Context) {
 		}
 		wait = 2 * time.Second
 		s.app.setStatus("")
+		if cfg.cloudMode() || cfg.fpMode() {
+			// Notices sent while there was no connection are lost (a laptop just switched on, the Wi-Fi back):
+			// everything is looked at once now.
+			select {
+			case s.cloudKick <- []int64{-1}:
+			default:
+			}
+		}
 		conn.SetReadLimit(64 << 10)
 		for {
 			_, data, err := conn.Read(ctx) // control frames (the server's pings) are answered inside Read
