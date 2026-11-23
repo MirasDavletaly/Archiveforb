@@ -11,7 +11,7 @@ name: Agent installers
 
 on:
   push:
-    paths: ['agent/**', '.github/workflows/agent.yml']
+    paths: ['agent/**', '.github/workflows/agent.yml', 'test/coedit-e2e.mjs']
   workflow_dispatch:
 
 permissions:
@@ -151,6 +151,29 @@ jobs:
       - name: Agent checks (folder mode)
         run: node --disable-warning=ExperimentalWarning agent/test/e2e.mjs
         env: { AGENT: '${{ github.workspace }}\agent\build\agent-test.exe', APP_URL: 'file:///${{ github.workspace }}/', WORK: '${{ runner.temp }}' }
+
+  # Two people editing one document at the same time in the browser, like Word or Excel online: Collabora Online
+  # (the same version as on the NAS) in Docker, the website, and two separate Chrome profiles.
+  office-coedit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Collabora Online, as on the NAS
+        run: |
+          docker run -d --name cool -p 9980:9980 --add-host=host.docker.internal:host-gateway \
+            -e aliasgroup1=http://host.docker.internal:8850 -e DONT_GEN_SSL_CERT=1 \
+            -e "extra_params=--o:ssl.enable=false --o:welcome.enable=false --o:admin_console.enable=false --o:fetch_update_check=0" \
+            collabora/code:26.04.6.1.1
+      - name: Two people in one document
+        run: node --disable-warning=ExperimentalWarning test/coedit-e2e.mjs
+        env: { WORK: '${{ runner.temp }}' }
+      - name: The editor's log when it failed
+        if: failure()
+        run: docker logs cool 2>&1 | tail -60
 
   windows-linux:
     runs-on: ubuntu-24.04
