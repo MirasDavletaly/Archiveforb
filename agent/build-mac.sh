@@ -89,9 +89,18 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>CFBundleURLName</key><string>com.companyfiles.agent.link</string>
     <key>CFBundleURLSchemes</key><array><string>myfiles</string></array>
   </dict></array>
+  <key>NSServices</key>
+  <array><dict>
+    <key>NSMenuItem</key><dict><key>default</key><string>Share (Company Files)…</string></dict>
+    <key>NSMessage</key><string>share</string>
+    <key>NSPortName</key><string>CompanyFiles</string>
+    <key>NSSendFileTypes</key><array><string>public.item</string></array>
+    <key>NSRequiredContext</key><dict/>
+  </dict></array>
 </dict>
 </plist>
 EOF
+plutil -lint "$APP/Contents/Info.plist"
 
 # ---- the File Provider extension (signed builds only) ----
 if [ -n "$GROUP" ]; then
@@ -140,6 +149,11 @@ if [ -n "$GROUP" ]; then
         <key>NSExtensionFileProviderActionIdentifier</key><string>com.companyfiles.free</string>
         <key>NSExtensionFileProviderActionName</key><string>Free Up Space</string>
         <key>NSExtensionFileProviderActionActivationRule</key><string>TRUEPREDICATE</string>
+      </dict>
+      <dict>
+        <key>NSExtensionFileProviderActionIdentifier</key><string>com.companyfiles.share</string>
+        <key>NSExtensionFileProviderActionName</key><string>Share (Company Files)…</string>
+        <key>NSExtensionFileProviderActionActivationRule</key><string>fileproviderItems.@count == 1</string>
       </dict>
     </array>
   </dict>

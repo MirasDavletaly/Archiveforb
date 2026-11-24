@@ -809,6 +809,8 @@ try {
   assert.ok(sharedKids.length === 1 && sharedKids[0].name === 'read me.txt' && sharedKids[0].readOnly && sharedKids[0].v);
   const rm = await asAgent('GET', `/api/agent/cloud/${sharedKids[0].id}/content`);
   assert.ok(rm.text === 'shared, read only' && rm.headers.get('x-version') === sharedKids[0].v, 'a file is fetched when it is opened');
+  assert.equal(ok(await agent('GET', `/api/agent/cloud-path?path=${encodeURIComponent('For Pavel/read me.txt')}`, devTok)).id, sharedKids[0].id, 'a path as the computer shows it gives the item (for "Share…")');
+  assert.equal((await asAgent('GET', `/api/agent/cloud-path?path=${encodeURIComponent('For Pavel/nothing.txt')}`)).status, 404);
   assert.equal((await asAgent('PUT', `/api/agent/cloud/${forPavel}/files?name=nope.txt`, 'x')).status, 403, 'read only stays read only');
   assert.equal((await asAgent('DELETE', `/api/agent/cloud/${sharedKids[0].id}`)).status, 403);
   const cNew = JSON.parse((await asAgent('PUT', `/api/agent/cloud/${home.id}/files?name=${encodeURIComponent('On demand?.txt')}`, 'one')).text);

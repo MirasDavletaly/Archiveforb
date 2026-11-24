@@ -146,6 +146,11 @@ func registerURLEvents(func(string)) {}
 
 func runHidden(*App) { select {} }
 
+// "Share…" (share.go): the folder copy has no ids, only paths (<folder>/My files/…).
+func localItemID(Config, string) (int64, bool) { return 0, false }
+
+func shareTops(cfg Config) []string { return []string{cfg.folder()} }
+
 // moveToTrash follows the freedesktop.org trash spec (~/.local/share/Trash), which file managers show as Trash.
 func moveToTrash(p string) error {
 	base := os.Getenv("XDG_DATA_HOME")

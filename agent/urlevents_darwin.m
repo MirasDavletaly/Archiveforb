@@ -26,6 +26,32 @@ void cfRegisterURLHandler(void) {
 // Registered as early as possible too, so the link that launched the app is not missed.
 __attribute__((constructor)) static void cfEarly(void) { cfRegisterURLHandler(); }
 
+// Finder's Services menu → "Share (Company Files)…" (declared in Info.plist: NSServices), on any Mac: the network
+// drive has no menu of its own.
+extern void goShareFile(char *path);
+
+@interface CFServices : NSObject
+- (void)share:(NSPasteboard *)pboard userData:(NSString *)userData error:(NSString **)error;
+@end
+
+@implementation CFServices
+- (void)share:(NSPasteboard *)pboard userData:(NSString *)userData error:(NSString **)error {
+	NSArray<NSURL *> *urls = [pboard readObjectsForClasses:@[[NSURL class]] options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
+	for (NSURL *u in urls) goShareFile((char *)u.path.UTF8String);
+}
+@end
+
+static CFServices *cfServices;
+
+void cfRegisterServices(void) {
+	dispatch_async(dispatch_get_main_queue(), ^{
+		if (cfServices == nil) cfServices = [CFServices new];
+		[NSApplication sharedApplication];
+		NSRegisterServicesProvider(cfServices, @"CompanyFiles"); // NSPortName in Info.plist
+		NSUpdateDynamicServices();
+	});
+}
+
 // The system Trash (the app needs no access to ~/.Trash for this). Returns 0 when moved.
 int cfTrash(const char *path) {
 	NSError *err = nil;

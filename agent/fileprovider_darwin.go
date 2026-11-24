@@ -17,6 +17,7 @@ int cfFPRemove(const char *ident, const char *name, char *err, int errlen);
 int cfFPSignal(const char *ident, const char *name);
 int cfFPEnabled(const char *ident);
 int cfFPRoot(const char *ident, const char *name, char *out, int outlen);
+int cfFPIdentifier(const char *path, char *out, int outlen);
 int cfGroupPath(const char *group, char *out, int outlen);
 */
 import "C"
@@ -30,6 +31,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 	"unsafe"
 )
@@ -163,6 +165,9 @@ func (s *Syncer) runFileProvider(stop <-chan struct{}) {
 	s.app.setStatus("")
 	tick := time.NewTicker(10 * time.Minute)
 	defer tick.Stop()
+	shares := time.NewTicker(time.Second)
+	defer shares.Stop()
+	group, _ := groupDir()
 	for {
 		select {
 		case <-stop:
@@ -171,8 +176,77 @@ func (s *Syncer) runFileProvider(stop <-chan struct{}) {
 			fpSignal(cfg)
 		case <-s.cloudKick: // the website says something changed
 			fpSignal(cfg)
+		case <-shares.C:
+			fpTakeShare(cfg, group)
 		}
 	}
+}
+
+// fpTakeShare: Finder's "Share (Company Files)…" on an item; the extension cannot open a browser, so it leaves the
+// item's id in the shared folder (share.json) for this app.
+func fpTakeShare(cfg Config, group string) {
+	if group == "" {
+		return
+	}
+	f := filepath.Join(group, "share.json")
+	b, err := os.ReadFile(f)
+	if err != nil {
+		return
+	}
+	_ = os.Remove(f)
+	var r struct {
+		ID int64 `json:"id"`
+	}
+	if json.Unmarshal(b, &r) == nil && r.ID > 0 {
+		openShare(cfg, r.ID)
+	}
+}
+
+// cliFPShare: what the extension does for Finder's "Share (Company Files)…", for a website id (the tests use it).
+func cliFPShare(args []string) int {
+	dir, err := groupDir()
+	if len(args) != 1 || err != nil {
+		fmt.Fprintln(os.Stderr, "usage: fp-share <id> (signed app only)")
+		return 2
+	}
+	n, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "not an id:", args[0])
+		return 2
+	}
+	b, _ := json.Marshal(map[string]int64{"id": n})
+	if err := os.WriteFile(filepath.Join(dir, "share.json"), b, 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
+}
+
+// localItemID: the website item behind a file or folder in Finder's Company Files (its identifier is "n<id>").
+func localItemID(cfg Config, abs string) (int64, bool) {
+	if !cfg.fpMode() || !strings.Contains(abs, "/Library/CloudStorage/") {
+		return 0, false
+	}
+	p := cstr(abs)
+	defer C.free(unsafe.Pointer(p))
+	buf := make([]byte, 256)
+	if C.cfFPIdentifier(p, (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))) != 0 {
+		return 0, false
+	}
+	s := C.GoString((*C.char)(unsafe.Pointer(&buf[0])))
+	id, err := strconv.ParseInt(strings.TrimPrefix(s, "n"), 10, 64)
+	return id, err == nil && strings.HasPrefix(s, "n")
+}
+
+// shareTops: where paths below are the website's paths: Finder's Company Files, the network drive, the folder copy.
+func shareTops(cfg Config) []string {
+	tops := []string{}
+	if cfg.fpMode() {
+		if root, err := fpCall(func(id, name, buf *C.char, n C.int) C.int { return C.cfFPRoot(id, name, buf, n) }, cfg); err == nil {
+			tops = append(tops, root)
+		}
+	}
+	return append(tops, driveMountPoint(cfg), cfg.folder())
 }
 
 func fpEnabled() int {

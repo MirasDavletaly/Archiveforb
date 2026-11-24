@@ -447,12 +447,22 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     }
 }
 
-// Finder's "Always Keep on This Device" and "Free Up Space" (declared in Info.plist: NSExtensionFileProviderActions).
+// Finder's "Always Keep on This Device", "Free Up Space" and "Share (Company Files)…" (declared in Info.plist:
+// NSExtensionFileProviderActions).
 extension FileProviderExtension: NSFileProviderCustomAction {
     func performAction(identifier actionIdentifier: NSFileProviderExtensionActionIdentifier, onItemsWithIdentifiers itemIdentifiers: [NSFileProviderItemIdentifier],
                        completionHandler: @escaping (Error?) -> Void) -> Progress {
+        let ids = itemIdentifiers.compactMap(nodeID) // the root is neither kept, freed nor shared
+        if actionIdentifier.rawValue == "com.companyfiles.share" {
+            // An extension cannot open the browser: the app (in the menu bar) takes the id from the shared folder and
+            // opens the website's access dialog for it.
+            if let id = ids.first, let dir = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: API.group) {
+                try? JSONEncoder().encode(["id": id]).write(to: dir.appendingPathComponent("share.json"), options: .atomic)
+            }
+            completionHandler(nil)
+            return Progress()
+        }
         let keep = actionIdentifier.rawValue == "com.companyfiles.keep"
-        let ids = itemIdentifiers.compactMap(nodeID) // the root is neither kept nor freed
         Task {
             await setKeep(domain, ids, keep: keep)
             completionHandler(nil)

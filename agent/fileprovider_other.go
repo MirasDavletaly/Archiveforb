@@ -13,3 +13,7 @@ func fpOpen(*App) {}
 func fpTeardown(Config) {}
 
 func cliKeep(bool, []string) int { return 2 }
+
+func cliFPShare([]string) int { return 2 }
+
+func registerServices(string) {}

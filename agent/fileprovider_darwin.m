@@ -89,6 +89,20 @@ int cfFPRoot(const char *ident, const char *name, char *out, int outlen) {
 	return 0;
 }
 
+// The extension's identifier ("n<id>") of a file or folder in Finder's Company Files folder, for "Share…".
+int cfFPIdentifier(const char *path, char *out, int outlen) {
+	dispatch_semaphore_t s = dispatch_semaphore_create(0);
+	__block NSString *ident = nil;
+	[NSFileProviderManager getIdentifierForUserVisibleFileAtURL:[NSURL fileURLWithPath:[NSString stringWithUTF8String:path]]
+	                                          completionHandler:^(NSFileProviderItemIdentifier itemIdentifier, NSFileProviderDomainIdentifier domainIdentifier, NSError *error) {
+		ident = itemIdentifier;
+		dispatch_semaphore_signal(s);
+	}];
+	if (cfWait(s) || ident == nil) return -1;
+	cfCopy(ident, out, outlen);
+	return 0;
+}
+
 // The folder this app and its extension share (the server address and this computer's token are kept there).
 int cfGroupPath(const char *group, char *out, int outlen) {
 	NSURL *u = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:[NSString stringWithUTF8String:group]];

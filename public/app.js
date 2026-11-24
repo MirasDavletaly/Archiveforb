@@ -300,6 +300,7 @@ async function route() {
       api('GET', '/api/tus').then(list => { up.unfinished = list; if (list.length) paintUploads(); }).catch(() => {});
     }
     if (page === 'f') return await viewFolder(Number(arg));
+    if (page === 'share') return await viewShare(Number(arg));
     if (page === 'shared') return await viewShared();
     if (page === 'trash') return await viewTrash();
     if (page === 'search') return await viewSearch(new URLSearchParams(qs || '').get('q') || '');
@@ -495,6 +496,15 @@ function viewHome() {
   const first = state.spaces.find(s => s.area === 'departments') || state.spaces[0];
   if (first) return location.replace(`#/f/${first.id}`);
   shell(empty('No folders yet', 'You have no access to any folder. Ask your department head.'));
+}
+
+// "Share…" on a computer opens #/share/<id>: the folder it is in, with its access dialog ready for adding people.
+async function viewShare(id) {
+  const d = await api('GET', `/api/nodes/${id}`);
+  const folder = d.node.dir ? d.node.id : d.crumbs.at(-2)?.id;
+  history.replaceState(null, '', folder ? `#/f/${folder}` : '#/shared'); // a file shared on its own has no folder here
+  await (folder ? viewFolder(folder) : viewShared());
+  await accessDialog(d.node.id, d.node.name, true);
 }
 
 async function viewFolder(id) {
@@ -1044,11 +1054,12 @@ async function versionsDialog(it) {
 // ---------------------------------------------------------------- access and links
 // Who has access: everyone who can open the item sees the list. Managers, IT and owners press Edit,
 // add people with "+ Add person" (one or many at once) and remove them with ×.
-async function accessDialog(nodeId, name) {
+async function accessDialog(nodeId, name, share = false) {
   const a = await api('GET', `/api/nodes/${nodeId}/access`);
   const dir = a.editable ? await api('GET', '/api/directory') : null;
   const what = a.dir ? 'folder' : 'file';
-  let editing = false, adding = false, restricted = a.restricted;
+  // share: opened from "Share…" on a computer: straight to adding people, where this person may
+  let editing = share && a.editable, adding = editing, restricted = a.restricted;
   let entries = a.own.map(e => ({ ...e }));
   const who = e => h('div', { class: 'acl-who' }, h('span', {}, e.name), h('small', {}, e.type === 'group' ? (e.kind === 'everyone' ? 'all employees' : 'group') : e.login));
   const list = (rows, none) => (rows.length ? h('div', { class: 'acl-list' }, rows) : h('p', { class: 'muted' }, none));

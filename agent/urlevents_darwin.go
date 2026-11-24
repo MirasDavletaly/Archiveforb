@@ -10,6 +10,7 @@ package main
 void cfRegisterURLHandler(void);
 void cfRunHidden(void);
 int cfTrash(const char *path);
+void cfRegisterServices(void);
 */
 import "C"
 
@@ -18,6 +19,20 @@ import (
 	"sync"
 	"unsafe"
 )
+
+var servicesDir string
+
+// registerServices: Finder's Services → "Share (Company Files)…" reaches this app (once its event loop runs).
+func registerServices(dir string) {
+	servicesDir = dir
+	C.cfRegisterServices()
+}
+
+//export goShareFile
+func goShareFile(p *C.char) {
+	s := C.GoString(p)
+	go cliShare(servicesDir, []string{s})
+}
 
 func moveToTrash(p string) error {
 	cs := C.CString(p)

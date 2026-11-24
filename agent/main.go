@@ -23,7 +23,7 @@ import (
 )
 
 var (
-	version       = "1.5.5"
+	version       = "1.5.6"
 	defaultServer = "" // -ldflags "-X main.defaultServer=https://files.example.ts.net"
 	appName       = "Company Files"
 	linkScheme    = "myfiles"
@@ -52,6 +52,10 @@ func main() {
 		os.Exit(cliSync(dir))
 	case "fp-keep", "fp-free": // Mac: Finder's "Always Keep on This Device" / "Free Up Space" for website ids (tests)
 		os.Exit(cliKeep(cmd == "fp-keep", args[1:]))
+	case "share": // Explorer's and Finder's "Share (Company Files)…": the website's access dialog for that item
+		os.Exit(cliShare(dir, args[1:]))
+	case "fp-share": // Mac: what Finder's "Share (Company Files)…" asks the app to do, for a website id (tests)
+		os.Exit(cliFPShare(args[1:]))
 	case "status":
 		c := loadConfig(dir)
 		fmt.Printf("server: %s\nconnected as: %s\nfolder: %s\nhidden: %v\n", c.Server, c.User, c.folder(), c.Hidden)
@@ -118,6 +122,7 @@ func runApp(dir, link string, headless bool) {
 		log.Printf("ipc: %v", err)
 	}
 	a.restartSync()
+	registerServices(dir) // Mac: Finder's Services → "Share (Company Files)…"
 	log.Printf("%s agent %s started (folder %s)", appName, version, a.config().folder())
 	if link != "" {
 		go a.handleLink(link)

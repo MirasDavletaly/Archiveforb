@@ -143,6 +143,18 @@ try {
   await unlink(path.join(ROOT, 'My files', 'Folder made here', 'Moved here.txt'));
   expect('deleted here: in the website trash', await until(async () => (await U.req('GET', '/api/trash')).some(t => t.id === madeId)));
 
+  // ---- "Share (Company Files)…" in Explorer: the website's access dialog for that file or folder ----
+  const opened = path.join(W, 'opened.txt');
+  const share = p => run(EXE, ['--config', CFG, 'share', p], { env: { ...env, COMPANYFILES_OPEN_LOG: opened }, timeout: 30000 }).then(() => 'ok', e => e.message);
+  const s1 = await share(reportPath), s2 = await share(path.join(ROOT, 'For Pavel'));
+  const urls = fs.existsSync(opened) ? fs.readFileSync(opened, 'utf8').trim().split(/\r?\n/) : [];
+  expect(`Share: the website's access dialog for that file and that folder (${s1}, ${s2}: ${urls.join(' ')})`, urls[0] === `${base}/#/share/${report}` && urls[1] === `${base}/#/share/${shared}`);
+  const verbsOf = (dir, name) => ps(`$i = (New-Object -ComObject Shell.Application).NameSpace('${dir.replace(/'/g, "''")}').ParseName('${name}'); ($i.Verbs() | ForEach-Object { $_.Name }) -join ' | '`).catch(e => e.message);
+  const inMenu = await verbsOf(path.dirname(reportPath), 'Report.txt');
+  expect(`... and it is in Explorer's menu of a file in the cloud folder (${inMenu})`, /Share \(Company Files\)/.test(inMenu));
+  fs.writeFileSync(path.join(W, 'elsewhere.txt'), 'not in the cloud folder');
+  expect('... but not of a file elsewhere', !/Share \(Company Files\)/.test(await verbsOf(W, 'elsewhere.txt')));
+
   // ---- Word-style save: rename to a temp name, write the new file, delete the temp copy ----
   const versionsBefore = (await U.req('GET', `/api/nodes/${report}/versions`)).length;
   await rename(reportPath, path.join(ROOT, 'My files', 'Docs', '~WRL0001.tmp'));
@@ -194,6 +206,8 @@ try {
   await run(EXE, ['--config', CFG, 'cloud-stop'], { env, timeout: 60000 }).catch(e => results.push('FAIL cloud-stop: ' + e.message));
   const left = await ps(`(Get-ChildItem 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager' | Where-Object { $_.PSChildName -like '${PROVIDER}!*' }).Count`).catch(() => '?');
   expect(`the test registration is gone afterwards (${left} left)`, left === '0');
+  const menu = await ps(`Test-Path -LiteralPath 'HKCU:\\Software\\Classes\\*\\shell\\${PROVIDER}Share'`).catch(e => e.message);
+  expect(`... and so is its Explorer menu item (${menu})`, menu === 'False');
   const failed = results.some(r => r.startsWith('FAIL'));
   console.log(results.join('\n'));
   console.log(failed ? 'SOME FAILED' : 'ALL OK');

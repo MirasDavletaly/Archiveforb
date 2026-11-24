@@ -122,6 +122,14 @@ try {
   await U.req('PUT', `/api/nodes/${home}/files?name=from-site.txt`, { raw: Buffer.from('from the website') });
   expect('a file added on the website opens on the drive', await until(async () => (await readFile(path.join(my, 'from-site.txt'), 'utf8')) === 'from the website', 60000));
 
+  // ---- "Share (Company Files)…" (Finder's Services menu): the website's access dialog for that file or folder ----
+  const opened = path.join(W, 'opened.txt');
+  const share = p => run(EXE, ['--config', CFG, 'share', p], { env: { ...process.env, COMPANYFILES_OPEN_LOG: opened }, timeout: 30000 }).then(() => 'ok', e => e.message);
+  const siteId = (await child(home, 'from-site.txt')).id;
+  const s1 = await share(path.join(my, 'from-site.txt')), s2 = await share(path.join(my, 'Mac folder'));
+  const urls = fs.existsSync(opened) ? fs.readFileSync(opened, 'utf8').trim().split('\n') : [];
+  expect(`Share on the drive: the website's access dialog for that file and that folder (${s1}, ${s2}: ${urls.join(' ')})`, urls[0] === `https://localhost:${SECURE}/#/share/${siteId}` && urls[1] === `https://localhost:${SECURE}/#/share/${folderId}`);
+
   // ---- deleting, and nothing of Finder's own on the website ----
   await unlink(path.join(my, 'Mac folder', 'renamed.txt'));
   expect('deleted on the drive: in the website trash', await until(async () => (await U.req('GET', '/api/trash')).some(t => t.id === madeId)));

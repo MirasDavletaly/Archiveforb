@@ -1960,7 +1960,15 @@ export function createApp(cfg = loadConfig()) {
     if (t) return { ...cloudItem(r.node, r.level), name: t.name, place: t.place, parent: 0 };
     return r.parentLevel ? { ...cloudItem(r.node, r.level), parent: r.node.parent_id } : null;
   }
-  add('GET', '/api/agent/cloud/:id/info', 'agent', c => cloudEntry(cloudNode(c, c.params.id), topsOf(c)) ?? fail(404, 'Not in the tree.'));
+  // A path as the computer shows it below its Company Files folder ("My files/Docs/a.txt", the network drive's view):
+  // the item's id, for "Share…" where the computer has no id of its own for it.
+  add('GET', '/api/agent/cloud-path', 'agent', c => {
+    const segs = String(c.query.get('path') || '').split(/[\\/]+/).filter(Boolean).map(s => s.normalize('NFC'));
+    const r = segs.length ? davFind(c, segs) : null;
+    if (!r || r.top) fail(404, 'Not on the website.');
+    return { id: r.node.id };
+  });
+  add('GET', '/api/agent/cloud/:id/info', 'agent',c => cloudEntry(cloudNode(c, c.params.id), topsOf(c)) ?? fail(404, 'Not in the tree.'));
 
   // What changed since a point of the change log (?since=seq): the items as they are now for this person, and the
   // ids that are gone for them (deleted, trashed, access taken away). No since: just the current point. A point

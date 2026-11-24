@@ -216,6 +216,9 @@ func (s *Syncer) runCloud(stop <-chan struct{}) {
 	}
 	c.key = key
 	log.Printf("files on demand: %s connected", c.root)
+	if err := registerShareMenu(cfg, c.root, s.app.dir); err != nil {
+		log.Printf("files on demand: Explorer's Share menu: %v", err)
+	}
 	defer func() {
 		disconnectSyncRoot(key)
 		theCloud = nil
@@ -1062,6 +1065,7 @@ func (c *Cloud) adopt(path string, it cloudItem) {
 // cloudTeardown unregisters the cloud folder. Files that are on this computer stay as ordinary files; the ones that
 // were only in the cloud (not downloaded) are removed, as they could not be opened any more.
 func cloudTeardown(cfg Config) {
+	unregisterShareMenu(cfg)
 	if cfg.CloudRegistered == "" {
 		return
 	}
@@ -1093,4 +1097,57 @@ func cloudTeardown(cfg Config) {
 		_ = unregisterSyncRootPath(root)
 	}
 	log.Printf("files on demand: %s is an ordinary folder again", root)
+}
+
+// ---- "Share…" in Explorer (Windows 10 and 11; on 11 under "Show more options") ----
+
+// shareMenuKeys: per registration name, so a test's menu never replaces or removes the real one.
+func shareMenuKeys(cfg Config) []string {
+	verb := cfg.CloudProvider() + "Share"
+	return []string{`Software\Classes\*\shell\` + verb, `Software\Classes\Directory\shell\` + verb}
+}
+
+// registerShareMenu adds "Share (Company Files)…" to files and folders inside the cloud folder only.
+func registerShareMenu(cfg Config, root, dir string) error {
+	exe := exePath()
+	for _, base := range shareMenuKeys(cfg) {
+		for _, v := range [][3]string{
+			{base, "", "Share (" + appName + ")…"},
+			{base, "Icon", exe + ",0"},
+			{base, "AppliesTo", `System.ItemPathDisplay:~<"` + strings.TrimRight(root, `\`) + `\"`}, // starts with: inside it
+			{base + `\command`, "", `"` + exe + `" --config "` + dir + `" share "%1"`},
+		} {
+			if err := setValue(v[0], v[1], v[2]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func unregisterShareMenu(cfg Config) {
+	for _, base := range shareMenuKeys(cfg) {
+		deleteTree(base)
+	}
+}
+
+// localItemID: the website item behind a placeholder in the cloud folder.
+func localItemID(cfg Config, abs string) (int64, bool) {
+	if !cfg.cloudMode() {
+		return 0, false
+	}
+	ph, err := getPlaceholderInfo(abs)
+	if err != nil {
+		return 0, false
+	}
+	id, ok := parseIdentity(ph.Identity)
+	return id.ID, ok
+}
+
+// shareTops: folders whose paths below them are the website's paths (for items the computer has no id for).
+func shareTops(cfg Config) []string {
+	if cfg.cloudMode() {
+		return []string{cloudRoot(cfg)}
+	}
+	return []string{cfg.folder()}
 }

@@ -76,6 +76,10 @@ const content = async id => (await U.req('GET', `/api/nodes/${id}/content`)).toS
 // Printed as they happen, so a run that hangs still shows how far it got. A file operation on the provider's folder
 // can wait for the extension forever: each try gives up after 25 s (more libuv threads keep stuck ones from blocking
 // the rest: UV_THREADPOOL_SIZE in the workflow).
+// "Share (Company Files)…": the app writes down the website address it would open in the browser
+const OPENED = path.join(W, 'opened.txt');
+const opened = () => fs.existsSync(OPENED) ? fs.readFileSync(OPENED, 'utf8').trim().split('\n') : [];
+const shareUrl = id => `https://localhost:${SECURE}/#/share/${id}`;
 const results = [];
 const expect = (label, ok) => { const line = `${ok ? 'ok  ' : 'FAIL'} ${label}`; results.push(line); console.log(line); };
 const until = async (fn, ms = 60000) => {
@@ -189,7 +193,7 @@ try {
   fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile, 'utf8')), initialized: true }));
   const pk = () => run('pluginkit', ['-m', '-v', '-v', '-v', '-i', 'com.companyfiles.agent.provider']).then(r => r.stdout.trim(), e => e.message);
   results.push('info extension before the app starts: ' + (await pk()).replace(/\s+/g, ' '));
-  agent = spawn(EXE, ['--config', CFG, '--headless'], { stdio: 'ignore' });
+  agent = spawn(EXE, ['--config', CFG, '--headless'], { stdio: 'ignore', env: { ...process.env, COMPANYFILES_OPEN_LOG: OPENED } });
   await sleep(8000);
   results.push('info extension once the app runs: ' + (await pk()).replace(/\s+/g, ' '));
 
@@ -282,6 +286,13 @@ try {
   expect('"Free Up Space": the download goes, the file stays in the folder', await until(async () => !(await local(kept)) && (await readdir(my)).includes('keep-me.txt'), 90000));
   expect('... and opens again when wanted', await until(async () => (await readFile(kept, 'utf8')) === 'kept on the Mac'));
 
+  // ---- "Share (Company Files)…": the website's access dialog for that file or folder ----
+  const share = p => run(EXE, ['--config', CFG, 'share', p], { env: { ...process.env, COMPANYFILES_OPEN_LOG: OPENED }, timeout: 90000 }).then(() => 'ok', e => e.message);
+  const s1 = await share(kept), s2 = await share(path.join(my, 'Mac folder'));
+  expect(`Share on a file and a folder in Finder's Company Files: the access dialog of each (${s1}, ${s2}: ${opened().join(' ')})`, opened()[0] === shareUrl(keptId) && opened()[1] === shareUrl(folderId));
+  await run(EXE, ['fp-share', String(madeId)], { timeout: 30000 });
+  expect('Finder\'s own menu item (the extension hands it to the app): the same dialog', await until(async () => opened().includes(shareUrl(madeId)), 30000));
+
   // ---- deleting here ----
   await timed('deleting', unlink(path.join(my, 'Mac folder', 'renamed.txt')));
   expect('deleted here: in the website trash', await until(async () => (await U.req('GET', '/api/trash')).some(t => t.id === madeId)));
@@ -308,6 +319,7 @@ try {
   servers[0].close(); // no network at login: the Wi-Fi is not up yet
   servers[0].closeAllConnections();
   await run('launchctl', ['setenv', 'COMPANYFILES_FP_WAIT', '45s']); // the provider's test wait, shorter than the time offline
+  await run('launchctl', ['setenv', 'COMPANYFILES_OPEN_LOG', OPENED]);
   const logMark = log().length;
   await run('launchctl', ['bootstrap', `gui/${process.getuid()}`, plist]);
   await sleep(60000);
@@ -317,6 +329,21 @@ try {
   expect('a minute offline at login did not switch it to the network drive', !/using the network drive instead/.test(since()));
   await U.req('PUT', `/api/nodes/${home}/files?name=${encodeURIComponent('after-restart.txt')}`, { raw: Buffer.from('after a restart') });
   expect('files from the website keep arriving in Finder', await until(async () => (await readFile(path.join(my, 'after-restart.txt'), 'utf8')) === 'after a restart', 120000));
+
+  // ---- Finder's Services → "Share (Company Files)…" (the app in the menu bar; works with the network drive too) ----
+  const svc = path.join(W, 'service.swift');
+  fs.writeFileSync(svc, [
+    'import AppKit',
+    '_ = NSApplication.shared',
+    'let pb = NSPasteboard(name: NSPasteboard.Name("companyfiles-test"))',
+    'pb.clearContents()',
+    'pb.writeObjects([URL(fileURLWithPath: CommandLine.arguments[1]) as NSURL])',
+    'print(NSPerformService("Share (Company Files)…", pb) ? "sent" : "not sent")',
+  ].join('\n'));
+  await sh('/System/Library/CoreServices/pbs -update');
+  const sent = await run('xcrun', ['swift', svc, path.join(my, 'after-restart.txt')], { timeout: 240000 }).then(r => (r.stdout + r.stderr).trim(), e => e.message);
+  const restartId = (await child(home, 'after-restart.txt')).id;
+  expect(`Finder's Services → "Share (Company Files)…": the access dialog (${sent})`, await until(async () => opened().includes(shareUrl(restartId)), 30000));
 } catch (e) {
   if (!e.done) results.push('FAIL ' + e.stack);
 } finally {
