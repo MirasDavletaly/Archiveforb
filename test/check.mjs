@@ -918,6 +918,39 @@ try {
   assert.ok(app.db.get(`SELECT 1 FROM audit WHERE action LIKE 'created folder on computer "Pavel laptop" (network drive)'`), 'logged with the computer\'s name');
   pass('Network drive (WebDAV) for Macs: the computer\'s token is the password, the same places and rules as the website, files and folders made, read, renamed, moved and trashed, versions kept (also through programs\' temporary files), Finder\'s own files kept out, locks for Finder');
 
+  // "My files at the top" (IT sets it per person): on their computers My files' contents are the top level.
+  assert.equal((await asAgent('PUT', '/api/agent/cloud/0/files?name=top.txt', 'x')).status, 403, 'normally the top level holds only the places');
+  const flatFrom = ok(await agent('GET', '/api/agent/cloud-changes', devTok)).anchor;
+  const clash = ok(await PO.post(`/api/nodes/${home.id}/folders`, { name: 'For Pavel' })).id; // the same name as a place
+  ok(await admin.patch(`/api/admin/users/${owner.id}`, { flat_home: true }));
+  assert.equal(ok(await admin.get('/api/admin/users')).find(u => u.id === owner.id).flat_home, 1);
+  const flatTop = ok(await agent('GET', '/api/agent/cloud', devTok));
+  const names = flatTop.map(x => x.name);
+  assert.ok(!names.includes('My files') && names.includes('chunked.bin') && names.includes('From Finder'), `My files' contents at the top, the folder itself gone: ${names.join(', ')}`);
+  assert.ok(flatTop.find(x => x.name === 'For Pavel')?.place && flatTop.find(x => x.name === 'For Pavel (2)')?.id === clash && !flatTop.find(x => x.name === 'chunked.bin').place, 'places stay (marked), a personal folder of the same name sits beside it as "(2)"');
+  const flatCh = ok(await agent('GET', `/api/agent/cloud-changes?since=${flatFrom}`, devTok));
+  assert.ok(flatCh.deleted.includes(home.id) && flatCh.items.some(x => x.id === clash && x.parent === 0), 'the Mac hears it: My files gone, its items now at the top');
+  assert.equal((await asAgent('GET', `/api/agent/cloud/${home.id}/info`)).status, 404);
+  const topNew = JSON.parse((await asAgent('PUT', '/api/agent/cloud/0/files?name=top.txt', 'at the top')).text);
+  assert.ok(ok(await PO.get(`/api/nodes/${home.id}`)).children.some(x => x.id === topNew.id), 'a file put at the top goes into My files');
+  assert.equal(ok(await agent('GET', `/api/agent/cloud/${topNew.id}/info`, devTok)).parent, 0);
+  const topDir = JSON.parse((await asAgent('POST', '/api/agent/cloud/0/folders?name=Top%20folder')).text);
+  ok(await agent('POST', `/api/agent/cloud/${topNew.id}/move?parent=${topDir.id}`, devTok));
+  ok(await agent('POST', `/api/agent/cloud/${topNew.id}/move?parent=0&name=back.txt`, devTok));
+  assert.ok(ok(await PO.get(`/api/nodes/${home.id}`)).children.some(x => x.id === topNew.id && x.name === 'back.txt'), 'moved into a folder and back to the top: in My files again');
+  const flatDav = await dv('PROPFIND', '/', { headers: { depth: '1' } });
+  assert.ok(flatDav.text.includes(`${davBase}/back.txt`) && !flatDav.text.includes(`${davBase}/My%20files/`), 'the network drive shows the same top level');
+  assert.equal((await dv('PUT', '/drive%20top.txt', { body: 'finder at the top' })).status, 201);
+  assert.ok(ok(await PO.get(`/api/nodes/${home.id}`)).children.some(x => x.name === 'drive top.txt'), '... and puts what is made at the top into My files');
+  assert.equal((await dv('DELETE', '/drive%20top.txt')).status, 204, 'a personal file at the top can be deleted');
+  assert.equal((await dv('DELETE', '/For%20Pavel')).status, 403, 'a place still cannot');
+  assert.ok((await spaces(PO)).some(s => s.area === 'personal'), 'the website is unchanged');
+  ok(await admin.patch(`/api/admin/users/${owner.id}`, { flat_home: false }));
+  assert.ok(ok(await agent('GET', '/api/agent/cloud', devTok)).some(x => x.name === 'My files' && x.place), 'switched off: My files is a folder again');
+  assert.equal((await asAgent('PUT', '/api/agent/cloud/0/files?name=again.txt', 'x')).status, 403);
+  assert.ok(app.db.get(`SELECT 1 FROM audit WHERE action = 'My files put at the top level on computers'`));
+  pass('My files at the top (IT sets it per person): on computers its contents are the top level beside the places, new and moved items at the top go into it, the Mac and the network drive follow, the website is unchanged');
+
   const gone2 = ok(await PO.upload(home.id, 'temp.txt', 'bye')).id;
   ok(await PO.post('/api/devices/send', { ids: [gone2] }));
   ok(await PO.del(`/api/nodes/${gone2}`));

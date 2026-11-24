@@ -1886,27 +1886,52 @@ export function createApp(cfg = loadConfig()) {
     return r;
   }
 
-  // The top level: the same places as the website's sidebar (My files, departments, projects, shared folders).
+  // "My files at the top" (set by IT per person, 2026-11-24): on their computers My files is not a folder; what is in
+  // it is the top level, next to the other places, and what they put at the top goes into it. The website is unchanged.
+  const flatHome = c => (c.user.flat_home ? acl.spaces(c.ctx).find(s => s.area === 'personal' && s.level === MANAGE) || null : null);
+
+  // The top level: the same places as the website's sidebar (My files, departments, projects, shared folders), marked
+  // place: they stay where they are. For "My files at the top", My files' own items instead of the folder itself.
   function cloudTop(c) {
-    const out = [], used = new Set();
-    for (const s of acl.spaces(c.ctx)) {
-      if (s.area === 'confidential') continue;
-      let name = s.area === 'personal' && s.level === MANAGE ? 'My files' : s.root ? AREA_ALL[s.area] : s.name;
-      for (let i = 2; used.has(name.toLowerCase()); i++) name = `${s.name} (${i})`;
+    const out = [], used = new Set(), home = flatHome(c);
+    const put = (item, other) => { // other(i): the name to try when it is taken
+      let name = item.name;
+      for (let i = 2; used.has(name.toLowerCase()); i++) name = other(i);
       used.add(name.toLowerCase());
-      out.push({ ...cloudItem(db.get('SELECT * FROM nodes WHERE id = ?', s.id), s.level), name });
+      out.push({ ...item, name });
+    };
+    for (const s of acl.spaces(c.ctx)) {
+      if (s.area === 'confidential' || s.id === home?.id) continue;
+      const name = s.area === 'personal' && s.level === MANAGE ? 'My files' : s.root ? AREA_ALL[s.area] : s.name;
+      put({ ...cloudItem(db.get('SELECT * FROM nodes WHERE id = ?', s.id), s.level), name, place: true }, i => `${s.name} (${i})`);
+    }
+    if (home) {
+      for (const n of db.all('SELECT id FROM nodes WHERE parent_id = ? AND deleted_at IS NULL ORDER BY is_dir DESC, name', home.id)) {
+        const x = acl.resolve(c.ctx, n.id);
+        const [, stem, dot] = /^(.+?)((?:\.[^.]*)?)$/.exec(x?.node.name || 'x');
+        if (x?.level) put(cloudItem(x.node, x.level), i => (x.node.is_dir ? `${x.node.name} (${i})` : `${stem} (${i})${dot}`)); // beside a place of that name
+      }
     }
     return out;
   }
   add('GET', '/api/agent/cloud', 'agent', cloudTop);
 
+  // The folder a computer puts something into. 0 is the top level: it holds only places, except for "My files at the
+  // top", where it is My files.
+  function cloudFolder(c, id) {
+    if (String(id) !== '0') return cloudNode(c, id, EDIT);
+    const home = flatHome(c);
+    if (!home) fail(403, 'The top level holds the places; put files inside one of them.');
+    return cloudNode(c, home.id, EDIT);
+  }
+
   // For the Mac's File Provider: an item with its parent there (0 = the top level) and, for a place at the top level,
   // the name it has there ("My files"). A file shared on its own, outside any folder the person can open, has no
-  // place in the tree (as on Windows) and counts as gone.
+  // place in the tree (as on Windows) and counts as gone; so does My files itself for "My files at the top".
   const topsOf = c => new Map(cloudTop(c).map(t => [t.id, t]));
   function cloudEntry(r, tops) {
     const t = tops.get(r.node.id);
-    if (t) return { ...cloudItem(r.node, r.level), name: t.name, parent: 0 };
+    if (t) return { ...cloudItem(r.node, r.level), name: t.name, place: t.place, parent: 0 };
     return r.parentLevel ? { ...cloudItem(r.node, r.level), parent: r.node.parent_id } : null;
   }
   add('GET', '/api/agent/cloud/:id/info', 'agent', c => cloudEntry(cloudNode(c, c.params.id), topsOf(c)) ?? fail(404, 'Not in the tree.'));
@@ -1951,7 +1976,7 @@ export function createApp(cfg = loadConfig()) {
 
   // A new file in a folder, or (id=, base=) a new version of a file there.
   add('PUT', '/api/agent/cloud/:id/files', 'agent', async c => {
-    let r = cloudNode(c, c.params.id, EDIT);
+    let r = cloudFolder(c, c.params.id);
     if (!r.node.is_dir) fail(400, 'Not a folder.');
     let name = fitName(c.query.get('name') || '');
     if (c.query.get('id')) {
@@ -1971,7 +1996,7 @@ export function createApp(cfg = loadConfig()) {
   });
 
   add('POST', '/api/agent/cloud/:id/folders', 'agent', c => {
-    const r = cloudNode(c, c.params.id, EDIT);
+    const r = cloudFolder(c, c.params.id);
     if (!r.node.is_dir) fail(400, 'Not a folder.');
     const name = fitName(c.query.get('name') || '');
     const ex = taken(r.node.id, name);
@@ -1993,8 +2018,8 @@ export function createApp(cfg = loadConfig()) {
     const r = cloudNode(c, c.params.id, EDIT);
     if (!r.node.is_dir && c.query.get('base') && contentVersion(r.node) !== c.query.get('base')) fail(409, 'It was changed on the website meanwhile.', 'changed');
     const parent = c.query.get('parent');
-    if (parent) cloudNode(c, parent, EDIT);
-    moveNode(c, r.node.id, { name: c.query.get('name') ? fitName(c.query.get('name')) : undefined, parent_id: parent ? int(parent) : undefined });
+    const to = parent ? cloudFolder(c, parent) : null;
+    moveNode(c, r.node.id, { name: c.query.get('name') ? fitName(c.query.get('name')) : undefined, parent_id: to ? to.node.id : undefined });
     const x = acl.resolve(c.ctx, r.node.id);
     return cloudItem(x.node, x.level);
   });
@@ -2047,9 +2072,9 @@ export function createApp(cfg = loadConfig()) {
   }
   // The folder a new item goes into: an existing folder below the root, where this person may edit.
   function davParent(c, segs) {
-    const p = davFind(c, segs.slice(0, -1));
+    let p = davFind(c, segs.slice(0, -1));
     if (!p) fail(409, 'The folder it should go into does not exist.');
-    if (p.top) fail(403, 'The top level holds the sections; put files inside one of them.');
+    if (p.top) p = cloudFolder(c, 0); // only "My files at the top" may put things there: into My files
     if (!p.node.is_dir) fail(409, 'That is not a folder.');
     if (p.level < EDIT) fail(403, 'You can only view this folder.');
     return p;
@@ -2207,7 +2232,7 @@ export function createApp(cfg = loadConfig()) {
       } else {
         const r = davFind(c, segs);
         if (!r) fail(404, 'Not found.');
-        if (r.top || segs.length < 2) fail(403, 'The places at the top level cannot be deleted.');
+        if (r.top || (segs.length < 2 && r.node.parent_id !== flatHome(c)?.id)) fail(403, 'The places at the top level cannot be deleted.');
         trashNode(c, r.node.id);
       }
       c.res.writeHead(204);
@@ -2245,7 +2270,7 @@ export function createApp(cfg = loadConfig()) {
       if (inMemory(dest)) fail(403, 'Files cannot be given names starting with a dot here.'); // never take real files into memory
       const r = davFind(c, segs);
       if (!r) fail(404, 'Not found.');
-      if (r.top || segs.length < 2) fail(403, 'The places at the top level cannot be moved.');
+      if (r.top || (segs.length < 2 && r.node.parent_id !== flatHome(c)?.id)) fail(403, 'The places at the top level cannot be moved.');
       const p = davParent(c, dest);
       const name = cleanName(dest.at(-1));
       const before = taken(p.node.id, name);
@@ -2710,7 +2735,7 @@ export function createApp(cfg = loadConfig()) {
 
   add('GET', '/api/admin/users', 'admin', () =>
     db.all(
-      `SELECT u.id, u.login, u.name, u.email, u.is_admin, u.disabled, u.created_at,
+      `SELECT u.id, u.login, u.name, u.email, u.is_admin, u.disabled, u.created_at, u.flat_home,
          EXISTS(SELECT 1 FROM members m WHERE m.user_id = u.id AND m.group_id = ${db.ids.managers}) AS manager,
          (SELECT MAX(seen_at) FROM sessions s WHERE s.user_id = u.id) AS last_seen,
          (SELECT group_concat(g.name, ', ') FROM members m JOIN groups g ON g.id = m.group_id WHERE m.user_id = u.id) AS groups
@@ -2795,6 +2820,16 @@ export function createApp(cfg = loadConfig()) {
         });
         audit(c, 'admin', email ? `email set to ${email}` : 'email removed', who);
       }
+    }
+    if (typeof b.flat_home === 'boolean' && b.flat_home !== !!u.flat_home) {
+      if (u.is_admin) fail(400, 'IT admin accounts have no files on computers.');
+      db.run('UPDATE users SET flat_home = ? WHERE id = ?', b.flat_home ? 1 : 0, u.id);
+      // Their computers rebuild the top level: My files and what is in it count as changed (the Mac's change log),
+      // and each online computer is told to look at everything.
+      const home = db.get('SELECT id FROM nodes WHERE parent_id = ? AND name = ? AND deleted_at IS NULL', db.ids.roots.personal, u.login);
+      if (home) db.run('INSERT INTO changes(node_id, at) SELECT id, ? FROM nodes WHERE (id = ? OR parent_id = ?) AND deleted_at IS NULL', Date.now(), home.id, home.id);
+      for (const d of db.all('SELECT id FROM devices WHERE user_id = ? AND revoked_at IS NULL', u.id)) notify(d.id, { type: 'cloud', folders: [-1] }, s => s.cloud);
+      audit(c, 'admin', b.flat_home ? 'My files put at the top level on computers' : 'My files shown as a folder on computers again', who);
     }
     if (typeof b.disabled === 'boolean') {
       if (u.id === c.user.id) fail(400, 'You cannot block your own account.');

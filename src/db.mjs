@@ -262,6 +262,8 @@ export function openDb(dataDir) {
   if (!raw.prepare(`SELECT 1 FROM pragma_table_info('users') WHERE name = 'no2fa'`).get()) raw.exec('ALTER TABLE users ADD COLUMN no2fa INTEGER NOT NULL DEFAULT 0');
   // Email of people who signed up by invite link (stored lowercase); they may sign in with it instead of the login.
   if (!raw.prepare(`SELECT 1 FROM pragma_table_info('users') WHERE name = 'email'`).get()) raw.exec('ALTER TABLE users ADD COLUMN email TEXT');
+  // Set by IT per person: on their computers My files is not a folder, its contents are the top level (website unchanged).
+  if (!raw.prepare(`SELECT 1 FROM pragma_table_info('users') WHERE name = 'flat_home'`).get()) raw.exec('ALTER TABLE users ADD COLUMN flat_home INTEGER NOT NULL DEFAULT 0');
   raw.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_email ON users(email) WHERE email IS NOT NULL');
   // Until when this account may set up 2FA for the first time from the internet (fresh sign-up).
   if (!raw.prepare(`SELECT 1 FROM pragma_table_info('users') WHERE name = 'enroll_until'`).get()) {

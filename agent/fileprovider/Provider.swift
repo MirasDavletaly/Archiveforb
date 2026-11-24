@@ -24,6 +24,7 @@ struct Entry: Decodable {
     let created: Double
     let readOnly: Bool
     let parent: Int64?
+    let place: Bool? // a place of the top level (My files, a department...): it stays where it is
 }
 
 struct Changes: Decodable {
@@ -249,6 +250,9 @@ func nodeID(_ i: NSFileProviderItemIdentifier) -> Int64? {
     i.rawValue.hasPrefix("n") ? Int64(i.rawValue.dropFirst()) : nil
 }
 
+// The website folder something is put into; 0 is the top level (the website takes it only for "My files at the top").
+func folderID(_ i: NSFileProviderItemIdentifier) -> Int64? { i == .rootContainer ? 0 : nodeID(i) }
+
 // Finder's own files, programs' temporary files and Office lock files stay on this computer only.
 func localOnly(_ name: String) -> Bool { name.hasPrefix(".") || name.hasPrefix("~$") || name == "Icon\r" }
 
@@ -288,19 +292,21 @@ final class Item: NSObject, NSFileProviderItem {
         var c: NSFileProviderItemCapabilities = e.dir ? [.allowsReading, .allowsContentEnumerating, .allowsEvicting] : [.allowsReading, .allowsEvicting]
         if !e.readOnly {
             c.insert(e.dir ? .allowsAddingSubItems : .allowsWriting)
-            if parent != .rootContainer { c.formUnion([.allowsRenaming, .allowsReparenting, .allowsDeleting]) } // the places stay
+            if e.place != true { c.formUnion([.allowsRenaming, .allowsReparenting, .allowsDeleting]) } // the places stay
         }
         return c
     }
 }
 
+// The top level takes new items: for "My files at the top" they go into My files; for anyone else the website refuses
+// them and they stay on this Mac only (createItem), as on Windows.
 final class RootItem: NSObject, NSFileProviderItem {
     var itemIdentifier: NSFileProviderItemIdentifier { .rootContainer }
     var parentItemIdentifier: NSFileProviderItemIdentifier { .rootContainer }
     var filename: String { "Company Files" }
     var contentType: UTType { .folder }
-    var capabilities: NSFileProviderItemCapabilities { [.allowsReading, .allowsContentEnumerating] }
-    var itemVersion: NSFileProviderItemVersion { NSFileProviderItemVersion(contentVersion: Data("root".utf8), metadataVersion: Data("root".utf8)) }
+    var capabilities: NSFileProviderItemCapabilities { [.allowsReading, .allowsContentEnumerating, .allowsAddingSubItems] }
+    var itemVersion: NSFileProviderItemVersion { NSFileProviderItemVersion(contentVersion: Data("root".utf8), metadataVersion: Data("root|2".utf8)) }
 }
 
 // MARK: - the extension
@@ -357,13 +363,17 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 if #available(macOS 13.0, *) { return completionHandler(nil, [], false, NSFileProviderError(.excludedFromSync)) }
                 return completionHandler(nil, [], false, CocoaError(.fileWriteNoPermission))
             }
-            guard let parent = nodeID(itemTemplate.parentItemIdentifier) else { // the top level holds the places
+            guard let parent = folderID(itemTemplate.parentItemIdentifier) else {
                 return completionHandler(nil, [], false, CocoaError(.fileWriteNoPermission))
             }
             do {
                 let isDir = itemTemplate.contentType?.conforms(to: .folder) ?? false
                 let e = isDir ? try await api.folder(in: parent, name: name) : try await api.upload(to: parent, ["name": name], file: url)
                 completionHandler(Item(e, parent: itemTemplate.parentItemIdentifier), [], false, nil)
+            } catch let a as APIError where a.status == 403 && parent == 0 {
+                // the top level holds only the places for this person: it stays on this Mac, not synced
+                if #available(macOS 13.0, *) { return completionHandler(nil, [], false, NSFileProviderError(.excludedFromSync)) }
+                completionHandler(nil, [], false, CocoaError(.fileWriteNoPermission))
             } catch {
                 completionHandler(nil, [], false, fpError(error))
             }
@@ -381,12 +391,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 if changedFields.contains(.filename) || changedFields.contains(.parentItemIdentifier) {
                     var q = ["name": item.filename]
                     if changedFields.contains(.parentItemIdentifier) {
-                        guard let p = nodeID(item.parentItemIdentifier) else { return completionHandler(nil, [], false, CocoaError(.fileWriteNoPermission)) }
+                        guard let p = folderID(item.parentItemIdentifier) else { return completionHandler(nil, [], false, CocoaError(.fileWriteNoPermission)) }
                         q["parent"] = String(p)
                     }
                     entry = try await api.move(id, q)
                 }
-                if changedFields.contains(.contents), let url = newContents, let folder = nodeID(item.parentItemIdentifier) {
+                if changedFields.contains(.contents), let url = newContents, let folder = folderID(item.parentItemIdentifier) {
                     let base = String(decoding: version.contentVersion, as: UTF8.self)
                     do {
                         entry = try await api.upload(to: folder, ["id": String(id), "base": base], file: url)

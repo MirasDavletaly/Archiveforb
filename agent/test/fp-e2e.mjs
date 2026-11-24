@@ -286,6 +286,15 @@ try {
   await timed('deleting', unlink(path.join(my, 'Mac folder', 'renamed.txt')));
   expect('deleted here: in the website trash', await until(async () => (await U.req('GET', '/api/trash')).some(t => t.id === madeId)));
 
+  // ---- "My files at the top" (IT sets it per person): what is in My files sits at the top level, no My files folder ----
+  await admin.req('PATCH', `/api/admin/users/${u.id}`, { json: { flat_home: true } });
+  expect('My files at the top: its files are at the top level in Finder, the folder itself is gone', await until(async () => { const t = await readdir(root); return t.includes('keep-me.txt') && t.includes('Mac folder') && !t.includes('My files'); }, 120000));
+  await timed('writing at the top', writeFile(path.join(root, 'top-from-mac.txt'), 'made at the top'));
+  expect('a file made at the top goes into My files on the website', await until(async () => { const n = await child(home, 'top-from-mac.txt'); return n && (await content(n.id)) === 'made at the top'; }, 90000));
+  await admin.req('PATCH', `/api/admin/users/${u.id}`, { json: { flat_home: false } });
+  expect('switched off: My files is a folder again', await until(async () => { const t = await readdir(root); return t.includes('My files') && !t.includes('keep-me.txt'); }, 120000));
+  expect('nothing went to the website trash on the way', !(await U.req('GET', '/api/trash')).some(t => ['keep-me.txt', 'top-from-mac.txt', 'Mac folder'].includes(t.name)));
+
   // ---- switched off and on again: macOS starts it at login (its LaunchAgent), with no network for a minute ----
   agent.kill(); // as when the laptop is switched off
   await sleep(2000);

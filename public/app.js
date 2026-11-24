@@ -1788,6 +1788,12 @@ async function viewPeople() {
           if (await confirmDialog(`Make ${u.name} a Manager?`, 'Managers open and edit every department and project folder. Other Managers see this change in the activity log.', 'Give Manager role'))
             await patch(u, { role: 'manager' }, `${u.name} is now a Manager.`);
         } },
+    u.is_admin ? null : u.flat_home
+      ? { label: 'Show My files as a folder on computers', run: () => patch(u, { flat_home: false }, `On ${u.name}'s computers, My files is a folder again.`) }
+      : { label: 'Put My files at the top on computers', run: async () => {
+          if (await confirmDialog(`Put My files at the top on ${u.name}'s computers?`, 'In the Company Files folder on their computers there is no My files folder: what is in it sits at the top, next to the other folders, and what they put at the top goes into My files. Nothing is moved, and the website stays as it is. Their computers change over by themselves within a minute.', 'Put at the top'))
+            await patch(u, { flat_home: true }, `On ${u.name}'s computers, My files is now at the top.`);
+        } },
     { label: u.email ? 'Change email' : 'Set email', run: () => formDialog(`Email of ${u.name}`,
       field('Email', h('input', { name: 'email', type: 'email', value: u.email || '', maxlength: 254, autocapitalize: 'none', spellcheck: 'false', autocomplete: 'off', placeholder: 'name@company.kz' }),
         'They can sign in with it. One email can have only one account, so nobody can sign up again with it through an invite link. Leave empty to remove it.'),
@@ -1816,7 +1822,8 @@ async function viewPeople() {
       u.is_admin ? h('span', { class: 'tag' }, 'IT admin') : u.manager ? h('span', { class: 'tag good' }, 'Manager') : h('span', { class: 'muted' }, 'Employee'),
       { v: u.groups || '', cls: 'muted' },
       { v: u.last_seen ? fmtDate(u.last_seen) : 'never', cls: 'mono' },
-      u.disabled ? h('span', { class: 'tag bad' }, 'blocked') : h('span', { class: 'muted' }, 'active'),
+      [u.disabled ? h('span', { class: 'tag bad' }, 'blocked') : h('span', { class: 'muted' }, 'active'),
+        u.flat_home ? [h('br'), h('small', { class: 'muted' }, 'My files at the top on computers')] : null],
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': `Actions for ${u.name}`, 'aria-haspopup': 'menu', onClick: e => openMenu(e.currentTarget, actions(u)) }, icon('dots', 'ico ico-dots'))])))), 'people');
 }
 

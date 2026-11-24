@@ -150,6 +150,16 @@ try {
   await unlink(path.join(ROOT, 'My files', 'Docs', '~WRL0001.tmp'));
   expect('a Word-style save becomes a new version of the same file (not delete + new)', await until(async () => (await content(report)) === 'report v4 saved by Word' && (await U.req('GET', `/api/nodes/${report}/versions`)).length === versionsBefore + 1 && !(await U.req('GET', '/api/trash')).some(t => t.id === report)));
 
+  // ---- "My files at the top" (IT sets it per person): what is in My files sits at the top level, no My files folder ----
+  await admin.req('PATCH', `/api/admin/users/${U.id}`, { json: { flat_home: true } });
+  expect('My files at the top: its folders and files are at the top level here, the folder itself is gone', await until(async () => { const t = await readdir(ROOT); return t.includes('Docs') && t.includes('For Pavel') && !t.includes('My files'); }, 60000));
+  expect('... and open as before', await until(async () => (await readFile(path.join(ROOT, 'Docs', 'Report.txt'), 'utf8')) === 'report v4 saved by Word'));
+  await writeFile(path.join(ROOT, 'At the top.txt'), 'made at the top');
+  expect('a file made at the top goes into My files on the website', await until(async () => { const n = await child(home, 'At the top.txt'); return n && (await content(n.id)) === 'made at the top'; }, 60000));
+  await admin.req('PATCH', `/api/admin/users/${U.id}`, { json: { flat_home: false } });
+  expect('switched off: My files is a folder again, with that file in it', await until(async () => { const t = await readdir(ROOT); return t.includes('My files') && !t.includes('Docs') && (await readdir(path.join(ROOT, 'My files'))).includes('At the top.txt'); }, 60000));
+  expect('nothing went to the website trash on the way', !(await U.req('GET', '/api/trash')).some(t => ['Docs', 'At the top.txt', 'Report.txt'].includes(t.name)));
+
   // ---- switched off and on again, with no network at first: back by itself, on the same account ----
   agent.kill(); // as when the laptop is switched off
   await sleep(1500);

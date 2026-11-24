@@ -584,10 +584,11 @@ func onNotifyRename(info *cfCallbackInfo, params *cfCallbackParams) uintptr {
 	return 0
 }
 
-// folderIDOf: the website folder a folder here stands for (refused for the top level, which holds the sections).
+// folderIDOf: the website folder a folder here stands for. The top level is 0: the website refuses it (it holds the
+// sections), except for people with "My files at the top", where it is their My files.
 func (c *Cloud) folderIDOf(dir string) (int64, error) {
 	if strings.EqualFold(filepath.Clean(dir), filepath.Clean(c.root)) {
-		return 0, &httpError{403, "the top level of " + c.s.app.config().name() + " holds its sections; put files inside one of them"}
+		return 0, nil
 	}
 	ph, err := getPlaceholderInfo(dir)
 	if err != nil {
@@ -774,6 +775,7 @@ func (c *Cloud) sendUp(path string) {
 		var it cloudItem // the website answers with its folder of that name if there is one: the two are merged
 		if err := api.call("POST", "/api/agent/cloud/"+strconv.FormatInt(parent, 10)+"/folders?name="+url.QueryEscape(st.Name()), nil, &it); err != nil {
 			log.Printf("files on demand: the website did not take folder %s: %v", path, err)
+			c.s.app.setStatus("\"" + st.Name() + "\" is only on this computer: " + errText(err))
 			return
 		}
 		log.Printf("files on demand: new folder here, made on the website: %s", path)

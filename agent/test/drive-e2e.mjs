@@ -129,6 +129,14 @@ try {
   expect(`Finder's .DS_Store and ._ files never reach the website (${dots.length ? dots.join(', ') : 'none'})`, dots.length === 0);
   results.push('info ' + (log().match(/network drive: not pinned[^\n]*/)?.[0] || 'pinned to Finder Favorites'));
 
+  // ---- "My files at the top" (IT sets it per person): the drive's top level shows what is in My files ----
+  await admin.req('PATCH', `/api/admin/users/${u.id}`, { json: { flat_home: true } });
+  expect('My files at the top: the drive shows its files at the top level, no My files folder', await until(async () => { const t = await readdir(mp); return t.includes('big.bin') && t.includes('Mac folder') && !t.includes('My files'); }, 90000));
+  await writeFile(path.join(mp, 'top on drive.txt'), 'made at the top');
+  expect('a file made at the top of the drive goes into My files on the website', await until(async () => { const n = await child(home, 'top on drive.txt'); return n && (await content(n.id)) === 'made at the top'; }));
+  await admin.req('PATCH', `/api/admin/users/${u.id}`, { json: { flat_home: false } });
+  expect('switched off: My files is a folder on the drive again', await until(async () => (await readdir(mp)).includes('My files'), 90000));
+
   // ---- disconnected on the website: the drive goes away ----
   for (const d of await U.req('GET', '/api/devices')) await U.req('DELETE', `/api/devices/${d.id}`);
   expect('disconnected on the website: the drive is disconnected too', await until(async () => !(await mountLine()), 60000));
