@@ -1687,7 +1687,7 @@ async function computersCard() {
       others.length ? h('p', { class: 'muted' }, 'Also for ', others.flatMap(([k, v], i) => [i ? ', ' : '', h('a', { href: v.url, download: '' }, OS_NAME[k])]), '.') : null,
       devices.length
         ? table(['Computer', 'Status', ['Waiting', 'num'], ['', 'c-btns']], devices.map(d => [
-            [h('strong', {}, d.name), h('br'), h('small', { class: 'muted' }, `${OS_NAME[d.os] || d.os} · connected ${fmtDate(d.created_at)}`)],
+            [h('strong', {}, d.name), h('br'), h('small', { class: 'muted' }, `${OS_NAME[d.os] || d.os}${d.app_version ? ` · app ${d.app_version}` : ''} · connected ${fmtDate(d.created_at)}`)],
             d.online ? h('span', { class: 'tag good' }, 'online') : h('span', { class: 'muted' }, d.seen_at ? `offline · seen ${fmtDate(d.seen_at)}` : 'offline'),
             { v: d.pending ? `${d.pending} file${d.pending === 1 ? '' : 's'}` : '—', cls: 'num mono' },
             h('button', { type: 'button', class: 'btn small', onClick: disconnect(d) }, 'Disconnect'),
@@ -1791,7 +1791,7 @@ async function viewPeople() {
     u.is_admin ? null : u.flat_home
       ? { label: 'Show My files as a folder on computers', run: () => patch(u, { flat_home: false }, `On ${u.name}'s computers, My files is a folder again.`) }
       : { label: 'Put My files at the top on computers', run: async () => {
-          if (await confirmDialog(`Put My files at the top on ${u.name}'s computers?`, 'In the Company Files folder on their computers there is no My files folder: what is in it sits at the top, next to the other folders, and what they put at the top goes into My files. Nothing is moved, and the website stays as it is. Their computers change over by themselves within a minute.', 'Put at the top'))
+          if (await confirmDialog(`Put My files at the top on ${u.name}'s computers?`, 'In the Company Files folder on their computers there is no My files folder: what is in it sits at the top, next to the other folders, and what they put at the top goes into My files. Nothing is moved, and the website stays as it is. Computers with Company Files 1.5.4 or later change over by themselves within a minute; older ones keep My files as a folder until they are updated.', 'Put at the top'))
             await patch(u, { flat_home: true }, `On ${u.name}'s computers, My files is now at the top.`);
         } },
     { label: u.email ? 'Change email' : 'Set email', run: () => formDialog(`Email of ${u.name}`,

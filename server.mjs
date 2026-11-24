@@ -22,6 +22,13 @@ const TRASH_DAYS = 30;
 const MAX_VERSIONS = 20;
 const LINK_MAX_DAYS = 30;
 const PATH_MAX = 200;
+// The first app version that puts things at the top level for "My files at the top"; older ones keep My files a folder.
+const FLAT_HOME_APP = '1.5.4';
+const atLeast = (v, min) => {
+  const a = String(v || '0').split('.').map(Number), b = min.split('.').map(Number);
+  for (let i = 0; i < 3; i++) if ((a[i] || 0) !== b[i]) return (a[i] || 0) > b[i];
+  return true;
+};
 const SESSION_IDLE = 12 * 3600e3;
 const SESSION_MAX = 7 * DAY;
 const LEVELS = ['', 'Read', 'Edit', 'Manage'];
@@ -1653,6 +1660,14 @@ export function createApp(cfg = loadConfig()) {
     const user = device && db.get('SELECT * FROM users WHERE id = ?', device.user_id);
     if (!user || user.disabled || user.deleted_at || user.is_admin) fail(401, 'This computer is not connected any more. Connect it again from the website.', 'unpaired');
     if (Date.now() - (device.seen_at || 0) > 60e3) db.run('UPDATE devices SET seen_at = ? WHERE id = ?', Date.now(), device.id);
+    // The app's version (the File Provider and Finder's drive client send none: they go by what the app reported).
+    const v = /CompanyFilesAgent\/(\d+\.\d+\.\d+)/.exec(req.headers['user-agent'] || '')?.[1];
+    if (v && v !== device.app_version) {
+      db.run('UPDATE devices SET app_version = ? WHERE id = ?', v, device.id);
+      // Updated far enough for "My files at the top": what is in My files changed for this computer (the Mac's log).
+      if (user.flat_home && atLeast(v, FLAT_HOME_APP) && !atLeast(device.app_version, FLAT_HOME_APP)) homeChanged(user);
+      device.app_version = v;
+    }
     return { device, user, ctx: acl.ctxFor(user) };
   }
 
@@ -1704,7 +1719,7 @@ export function createApp(cfg = loadConfig()) {
 
   add('GET', '/api/devices', 'user', c =>
     myDevices(c).map(d => ({
-      id: d.id, name: d.name, os: d.os, created_at: d.created_at, seen_at: d.seen_at, online: online(d.id),
+      id: d.id, name: d.name, os: d.os, app_version: d.app_version, created_at: d.created_at, seen_at: d.seen_at, online: online(d.id),
       pending: db.get('SELECT COUNT(*) n FROM device_queue WHERE device_id = ? AND done_at IS NULL', d.id).n,
     })),
   );
@@ -1888,7 +1903,15 @@ export function createApp(cfg = loadConfig()) {
 
   // "My files at the top" (set by IT per person, 2026-11-24): on their computers My files is not a folder; what is in
   // it is the top level, next to the other places, and what they put at the top goes into it. The website is unchanged.
-  const flatHome = c => (c.user.flat_home ? acl.spaces(c.ctx).find(s => s.area === 'personal' && s.level === MANAGE) || null : null);
+  // Someone's computers rebuild the top level: My files and what is in it count as changed (the Mac's change log), and
+  // each online computer is told to look at everything.
+  function homeChanged(u) {
+    const home = db.get('SELECT id FROM nodes WHERE parent_id = ? AND name = ? AND deleted_at IS NULL', db.ids.roots.personal, u.login);
+    if (home) db.run('INSERT INTO changes(node_id, at) SELECT id, ? FROM nodes WHERE (id = ? OR parent_id = ?) AND deleted_at IS NULL', Date.now(), home.id, home.id);
+    for (const d of db.all('SELECT id FROM devices WHERE user_id = ? AND revoked_at IS NULL', u.id)) notify(d.id, { type: 'cloud', folders: [-1] }, s => s.cloud);
+  }
+  // Only for computers whose app knows it (1.5.4 and later): an older one keeps My files as a folder until updated.
+  const flatHome = c => (c.user.flat_home && atLeast(c.device?.app_version, FLAT_HOME_APP) ? acl.spaces(c.ctx).find(s => s.area === 'personal' && s.level === MANAGE) || null : null);
 
   // The top level: the same places as the website's sidebar (My files, departments, projects, shared folders), marked
   // place: they stay where they are. For "My files at the top", My files' own items instead of the folder itself.
@@ -1914,7 +1937,10 @@ export function createApp(cfg = loadConfig()) {
     }
     return out;
   }
-  add('GET', '/api/agent/cloud', 'agent', cloudTop);
+  add('GET', '/api/agent/cloud', 'agent', c => {
+    if (flatHome(c)) c.res.setHeader('X-Top-Holds-Files', '1'); // the Mac lets Finder put things at the top then
+    return cloudTop(c);
+  });
 
   // The folder a computer puts something into. 0 is the top level: it holds only places, except for "My files at the
   // top", where it is My files.
@@ -2824,11 +2850,7 @@ export function createApp(cfg = loadConfig()) {
     if (typeof b.flat_home === 'boolean' && b.flat_home !== !!u.flat_home) {
       if (u.is_admin) fail(400, 'IT admin accounts have no files on computers.');
       db.run('UPDATE users SET flat_home = ? WHERE id = ?', b.flat_home ? 1 : 0, u.id);
-      // Their computers rebuild the top level: My files and what is in it count as changed (the Mac's change log),
-      // and each online computer is told to look at everything.
-      const home = db.get('SELECT id FROM nodes WHERE parent_id = ? AND name = ? AND deleted_at IS NULL', db.ids.roots.personal, u.login);
-      if (home) db.run('INSERT INTO changes(node_id, at) SELECT id, ? FROM nodes WHERE (id = ? OR parent_id = ?) AND deleted_at IS NULL', Date.now(), home.id, home.id);
-      for (const d of db.all('SELECT id FROM devices WHERE user_id = ? AND revoked_at IS NULL', u.id)) notify(d.id, { type: 'cloud', folders: [-1] }, s => s.cloud);
+      homeChanged(u);
       audit(c, 'admin', b.flat_home ? 'My files put at the top level on computers' : 'My files shown as a folder on computers again', who);
     }
     if (typeof b.disabled === 'boolean') {

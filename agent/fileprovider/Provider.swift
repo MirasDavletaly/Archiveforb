@@ -120,6 +120,11 @@ final class API {
     }
 
     func top() async throws -> [Entry] { try await json("GET", "/api/agent/cloud", as: [Entry].self) }
+    // Whether things may be put at the top level (only for "My files at the top", where they go into My files).
+    func topHoldsFiles() async -> Bool {
+        guard let r = try? request("GET", "/api/agent/cloud"), let answer = try? await session.data(for: r) else { return false }
+        return (answer.1 as? HTTPURLResponse)?.value(forHTTPHeaderField: "X-Top-Holds-Files") == "1"
+    }
     func children(_ id: Int64) async throws -> [Entry] { try await json("GET", "/api/agent/cloud/\(id)", as: [Entry].self) }
     func info(_ id: Int64) async throws -> Entry { try await json("GET", "/api/agent/cloud/\(id)/info", as: Entry.self) }
     func changes(since: Int64?) async throws -> Changes {
@@ -298,15 +303,17 @@ final class Item: NSObject, NSFileProviderItem {
     }
 }
 
-// The top level takes new items: for "My files at the top" they go into My files; for anyone else the website refuses
-// them and they stay on this Mac only (createItem), as on Windows.
+// The top level takes new items only for "My files at the top" (they go into My files); for anyone else Finder does
+// not offer it, so nothing ends up here unsynced.
 final class RootItem: NSObject, NSFileProviderItem {
+    let holdsFiles: Bool
+    init(holdsFiles: Bool) { self.holdsFiles = holdsFiles }
     var itemIdentifier: NSFileProviderItemIdentifier { .rootContainer }
     var parentItemIdentifier: NSFileProviderItemIdentifier { .rootContainer }
     var filename: String { "Company Files" }
     var contentType: UTType { .folder }
-    var capabilities: NSFileProviderItemCapabilities { [.allowsReading, .allowsContentEnumerating, .allowsAddingSubItems] }
-    var itemVersion: NSFileProviderItemVersion { NSFileProviderItemVersion(contentVersion: Data("root".utf8), metadataVersion: Data("root|2".utf8)) }
+    var capabilities: NSFileProviderItemCapabilities { holdsFiles ? [.allowsReading, .allowsContentEnumerating, .allowsAddingSubItems] : [.allowsReading, .allowsContentEnumerating] }
+    var itemVersion: NSFileProviderItemVersion { NSFileProviderItemVersion(contentVersion: Data("root".utf8), metadataVersion: Data("root|\(holdsFiles)".utf8)) }
 }
 
 // MARK: - the extension
@@ -328,7 +335,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     func item(for identifier: NSFileProviderItemIdentifier, request: NSFileProviderRequest,
               completionHandler: @escaping (NSFileProviderItem?, Error?) -> Void) -> Progress {
         Task {
-            if identifier == .rootContainer { return completionHandler(RootItem(), nil) }
+            if identifier == .rootContainer { return completionHandler(RootItem(holdsFiles: await api.topHoldsFiles()), nil) }
             guard let id = nodeID(identifier) else { return completionHandler(nil, NSFileProviderError(.noSuchItem)) }
             do { completionHandler(Item(try await api.info(id)), nil) } catch { completionHandler(nil, fpError(error)) }
         }
@@ -370,10 +377,6 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 let isDir = itemTemplate.contentType?.conforms(to: .folder) ?? false
                 let e = isDir ? try await api.folder(in: parent, name: name) : try await api.upload(to: parent, ["name": name], file: url)
                 completionHandler(Item(e, parent: itemTemplate.parentItemIdentifier), [], false, nil)
-            } catch let a as APIError where a.status == 403 && parent == 0 {
-                // the top level holds only the places for this person: it stays on this Mac, not synced
-                if #available(macOS 13.0, *) { return completionHandler(nil, [], false, NSFileProviderError(.excludedFromSync)) }
-                completionHandler(nil, [], false, CocoaError(.fileWriteNoPermission))
             } catch {
                 completionHandler(nil, [], false, fpError(error))
             }

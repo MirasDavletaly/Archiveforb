@@ -920,10 +920,17 @@ try {
 
   // "My files at the top" (IT sets it per person): on their computers My files' contents are the top level.
   assert.equal((await asAgent('PUT', '/api/agent/cloud/0/files?name=top.txt', 'x')).status, 403, 'normally the top level holds only the places');
+  const appIs = v => fetch(base + '/api/agent/cloud', { headers: { authorization: `Bearer ${devTok}`, 'user-agent': `CompanyFilesAgent/${v} (windows)` } }).then(r => r.arrayBuffer());
+  await appIs('1.5.3');
   const flatFrom = ok(await agent('GET', '/api/agent/cloud-changes', devTok)).anchor;
   const clash = ok(await PO.post(`/api/nodes/${home.id}/folders`, { name: 'For Pavel' })).id; // the same name as a place
   ok(await admin.patch(`/api/admin/users/${owner.id}`, { flat_home: true }));
   assert.equal(ok(await admin.get('/api/admin/users')).find(u => u.id === owner.id).flat_home, 1);
+  assert.ok(ok(await agent('GET', '/api/agent/cloud', devTok)).some(x => x.name === 'My files'), 'a computer with an older app keeps My files as a folder until it is updated');
+  assert.equal((await asAgent('PUT', '/api/agent/cloud/0/files?name=top.txt', 'x')).status, 403);
+  await appIs('1.5.4');
+  const topHeader = async () => { const r = await fetch(base + '/api/agent/cloud', { headers: { authorization: `Bearer ${devTok}` } }); await r.arrayBuffer(); return r.headers.get('x-top-holds-files'); };
+  assert.equal(await topHeader(), '1', 'the Mac is told it may put things at the top (Finder offers it only then)');
   const flatTop = ok(await agent('GET', '/api/agent/cloud', devTok));
   const names = flatTop.map(x => x.name);
   assert.ok(!names.includes('My files') && names.includes('chunked.bin') && names.includes('From Finder'), `My files' contents at the top, the folder itself gone: ${names.join(', ')}`);
@@ -948,6 +955,7 @@ try {
   ok(await admin.patch(`/api/admin/users/${owner.id}`, { flat_home: false }));
   assert.ok(ok(await agent('GET', '/api/agent/cloud', devTok)).some(x => x.name === 'My files' && x.place), 'switched off: My files is a folder again');
   assert.equal((await asAgent('PUT', '/api/agent/cloud/0/files?name=again.txt', 'x')).status, 403);
+  assert.equal(await topHeader(), null, '... and no longer told so');
   assert.ok(app.db.get(`SELECT 1 FROM audit WHERE action = 'My files put at the top level on computers'`));
   pass('My files at the top (IT sets it per person): on computers its contents are the top level beside the places, new and moved items at the top go into it, the Mac and the network drive follow, the website is unchanged');
 
