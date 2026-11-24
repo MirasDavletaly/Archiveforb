@@ -638,6 +638,17 @@ try {
   ok(await save('co 4', fed.token));
   assert.equal(ok(await PO.get(`/api/nodes/${report}/content`)).toString(), 'co 4');
   assert.equal(ok(await PO.get(`/api/nodes/${report}/versions`)).length, together, 'editing together: one version for the session, not one per save');
+  // Through the VPS entrance the editor opens at its fast address there; everyone else keeps OFFICE_URL.
+  Object.assign(cfg, { trustProxy: true, relayIps: ['100.64.0.9'], officeRelayUrl: 'https://office.relay.example' });
+  const viaVps = { 'x-forwarded-for': '100.64.0.9' };
+  const relayEd = ok(await PO.req('POST', `/api/nodes/${report}/editor`, { headers: viaVps }));
+  assert.ok(relayEd.url.startsWith('https://office.relay.example/browser/abc/cool.html?WOPISrc='), 'through the VPS: the editor at the VPS address');
+  assert.equal(new URL(decodeURIComponent(relayEd.url.split('WOPISrc=')[1])).pathname, src, '... the same document');
+  assert.match((await fetch(`${base}/`, { headers: viaVps })).headers.get('content-security-policy'), /frame-src 'self' https:\/\/office\.relay\.example;/);
+  assert.ok(ok(await PO.post(`/api/nodes/${report}/editor`)).url.startsWith(`${officeOrigin}/`), 'the old address keeps its editor address');
+  assert.ok(ok(await PO.req('POST', `/api/nodes/${report}/editor`, { headers: { 'x-forwarded-for': '198.51.100.4' } })).url.startsWith(`${officeOrigin}/`), 'only the VPS itself counts as the VPS');
+  assert.match((await fetch(`${base}/`)).headers.get('content-security-policy'), new RegExp(`frame-src 'self' ${officeOrigin};`));
+  Object.assign(cfg, { trustProxy: false, relayIps: [], officeRelayUrl: null });
   // The PDF editor that keeps pages as they are.
   ok(await PO.put(`/api/nodes/${pdf}/access`, { entries: [{ type: 'user', id: friend.id, level: 1 }] }));
   const pv2 = ok(await PO.post(`/api/nodes/${pdf}/pdf-edit`));

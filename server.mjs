@@ -148,7 +148,7 @@ export function createApp(cfg = loadConfig()) {
   const GRANT = cfg.secure ? '__Secure-grant' : 'grant';
   const staticCache = new Map();
   // The editor page is framed from its own origin, and the file token is posted to it.
-  const csp = cfg.officeUrl ? CSP.replace("form-action 'self'", `frame-src 'self' ${cfg.officeUrl}; form-action 'self' ${cfg.officeUrl}`) : CSP;
+  const cspFor = office => (office ? CSP.replace("form-action 'self'", `frame-src 'self' ${office}; form-action 'self' ${office}`) : CSP);
   const routes = [];
   // Bytes of uploads still streaming, so parallel uploads cannot overshoot quotas or fill the disk.
   const reserved = new Map();
@@ -170,12 +170,16 @@ export function createApp(cfg = loadConfig()) {
   // Proxy headers are believed only from a proxy on this machine (Tailscale Serve, Caddy).
   // The last X-Forwarded-For entry is the one that proxy added; proxies that append (nginx) keep whatever the client sent in front.
   const viaProxy = req => cfg.trustProxy && /^(127\.|::1$|::ffff:127\.)/.test(req.socket.remoteAddress || '');
+  const hopIp = req => (viaProxy(req) && String(req.headers['x-forwarded-for'] || '').split(',').pop().trim()) || req.socket.remoteAddress || '';
+  const viaRelay = req => cfg.relayIps.includes(hopIp(req)); // came in through the VPS entrance
   const clientIp = req => {
-    const ip = (viaProxy(req) && String(req.headers['x-forwarded-for'] || '').split(',').pop().trim()) || req.socket.remoteAddress || '';
+    const ip = hopIp(req);
     // Through the VPS entrance the nearest hop is the VPS itself; it says whose request it passes on.
     const relayed = cfg.relayIps.includes(ip) && String(req.headers['x-relay-client-ip'] || '').trim();
     return relayed && net.isIP(relayed) ? relayed : ip;
   };
+  // The editor's address for this visitor: the fast one through the VPS entrance, else OFFICE_URL as always.
+  const officeFor = req => (cfg.officeRelayUrl && viaRelay(req) ? cfg.officeRelayUrl : cfg.officeUrl);
 
   // Per-IP limits: an IPv6 client controls a whole /64, so the /64 is what gets counted.
   const ipKey = ip => {
@@ -1467,8 +1471,9 @@ export function createApp(cfg = loadConfig()) {
     const wid = pdf ? `p${r.node.id}` : String(r.node.id);
     const exp = Date.now() + WOPI_TTL;
     const src = `${cfg.wopiUrl}/api/wopi/files/${wid}`;
+    const at = officeFor(c.req) + url.slice(cfg.officeUrl.length); // the same editor page, at this visitor's address
     return {
-      url: `${url}${/[?&]$/.test(url) ? '' : url.includes('?') ? '&' : '?'}WOPISrc=${encodeURIComponent(src)}`,
+      url: `${at}${/[?&]$/.test(at) ? '' : at.includes('?') ? '&' : '?'}WOPISrc=${encodeURIComponent(src)}`,
       token: [c.user.id, wid, exp, c.session.id, wopiSig(c.user.id, wid, exp, c.session.id)].join('.'),
       ttl: exp,
       edit: r.level >= EDIT,
@@ -3083,7 +3088,7 @@ export function createApp(cfg = loadConfig()) {
     const c = { req, res, ip: clientIp(req), user: null };
     let url;
     try {
-      res.setHeader('Content-Security-Policy', csp);
+      res.setHeader('Content-Security-Policy', cspFor(officeFor(req)));
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('X-Frame-Options', 'SAMEORIGIN');
       res.setHeader('Referrer-Policy', 'no-referrer');

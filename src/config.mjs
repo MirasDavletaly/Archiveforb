@@ -41,6 +41,8 @@ export function loadConfig(env = process.env) {
     // Outgoing mail for sign-up codes. Without SMTP_HOST, invite links cannot be finished.
     // Collabora Online (in-browser editing of office files over WOPI). Off when unset.
     officeUrl: env.OFFICE_URL ? new URL(env.OFFICE_URL).origin : null,
+    // The editor's address for people who came in through the VPS entrance (fast there); others use OFFICE_URL.
+    officeRelayUrl: env.OFFICE_RELAY_URL ? new URL(env.OFFICE_RELAY_URL).origin : null,
     officeInternal: env.OFFICE_INTERNAL_URL ? new URL(env.OFFICE_INTERNAL_URL).origin : null, // where Files reads discovery
     pdfConverter: env.PDF_CONVERTER_URL ? new URL(env.PDF_CONVERTER_URL).origin : null, // PDF -> DOCX for editing PDFs
     wopiUrl: wopiUrl.origin,

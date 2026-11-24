@@ -86,6 +86,8 @@ services:
       MAIL_FROM: ${MAIL_FROM:-}
       # In-browser editing of office files (Collabora below). Empty keeps the editor off.
       OFFICE_URL: ${OFFICE_URL:-}
+      # The editor's address for people who come in through the VPS entrance (empty: OFFICE_URL for everyone).
+      OFFICE_RELAY_URL: ${OFFICE_RELAY_URL:-}
       # The editor calls Files over this compose network (milliseconds, never leaves the NAS) instead of going out
       # to the internet and back through Funnel (seconds). Only WOPI routes answer on this port.
       WOPI_PORT: "8801"
@@ -148,7 +150,10 @@ services:
       extra_params: >-
         --o:ssl.enable=false --o:ssl.termination=true --o:admin_console.enable=false
         --o:logging.level=warning --o:fetch_update_check=0 --o:allow_update_popup=false --o:welcome.enable=false
-        --o:security.seccomp=false --o:mount_jail_tree=false --o:net.frame_ancestors=${PUBLIC_URL}
+        --o:security.seccomp=false --o:mount_jail_tree=false
+    # Who may show the editor in a frame: Files at each of its addresses (PUBLIC_URL, and the VPS entrance's in
+    # EXTRA_ORIGINS, space-separated). One argument, since the image has no shell to split extra_params by quotes.
+    command: ["--o:net.frame_ancestors=${PUBLIC_URL} ${EXTRA_ORIGINS:-}"]
     logging: *logging
 
   # PDF -> Word for editing PDFs in the browser; reached only by Files over this compose network, keeps no files.
