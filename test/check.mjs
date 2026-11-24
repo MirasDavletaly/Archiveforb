@@ -1212,11 +1212,21 @@ try {
   assert.equal((await new Client().post('/api/login', { login: 'r.temiresh', password: rassul.password })).status, 401, 'the old password is gone');
   assert.equal(ok(await new Client().post('/api/login', { login: 'rassul@example.com', password: pwR })).stage, 'full', 'the new one works, with no forced change');
   assert.ok(app.db.get(`SELECT 1 FROM audit WHERE action = 'password changed with a code sent to the email' AND actor = ?`, rassul.id));
+  // IT changes the login: the personal folder is renamed with it, the same folder with the same files.
+  assert.equal((await admin.patch(`/api/admin/users/${rassul.id}`, { login: 'e.eng' })).status, 409, 'a taken login is refused');
+  assert.equal((await admin.patch(`/api/admin/users/${rassul.id}`, { login: 'bad login' })).status, 400);
+  const rHome = app.db.get('SELECT id FROM nodes WHERE parent_id = ? AND name = ?', app.db.ids.roots.personal, 'r.temiresh').id;
+  ok(await admin.patch(`/api/admin/users/${rassul.id}`, { login: 'r.temir' }));
+  assert.equal(app.db.get('SELECT name FROM nodes WHERE id = ?', rHome).name, 'r.temir', 'the personal folder follows the login');
+  assert.ok(!app.db.get(`SELECT 1 FROM users WHERE login = 'r.temiresh'`), 'the old login is gone');
+  const RT = new Client();
+  ok(await RT.post('/api/login', { login: 'r.temir', password: pwR }));
+  assert.ok((await spaces(RT)).some(s => s.area === 'personal' && s.level === 3), 'My files is still theirs');
   cfg.smtp = null;
   smtp.close();
   pass('Sign-up by invite link: email confirmed with a one-time code (10 min, 5 tries, 1 a minute), invited domain only, link limits, sign in with email');
   pass('One email, one account: IT can record an email; neither IT nor an invite link can make a second account with it');
-  pass('IT edits name and email but never a password; "Forgot your password?" sends a code (unknown addresses get none, same answers), sets the new password and ends sessions');
+  pass('IT edits name, login (the personal folder follows) and email but never a password; "Forgot your password?" sends a code (unknown addresses get none, same answers), sets the new password and ends sessions');
 
   // ---- regressions for the security audit of 2026-11-13 (each was a working exploit) ----
   {

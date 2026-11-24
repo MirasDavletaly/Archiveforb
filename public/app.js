@@ -1841,9 +1841,11 @@ async function viewPeople() {
     // Everything but the password: people change that themselves ("Forgot your password?" on the sign-in page).
     { label: 'Edit details', run: () => formDialog(`Details of ${u.name}`, [
       field('Full name', h('input', { name: 'name', value: u.name, required: true, maxlength: 80, autocomplete: 'off' })),
+      field('Login', h('input', { name: 'login', value: u.login, required: true, maxlength: 40, autocapitalize: 'none', spellcheck: 'false', autocomplete: 'off' }),
+        'They sign in with it. Their files and computers stay as they are.'),
       field('Email', h('input', { name: 'email', type: 'email', value: u.email || '', maxlength: 254, autocapitalize: 'none', spellcheck: 'false', autocomplete: 'off', placeholder: 'name@company.kz' }),
         'They sign in with it, and a code for a forgotten password goes to it. One email can have only one account. Leave empty to remove it.'),
-    ], 'Save', v => patch(u, { name: v.name.trim(), email: v.email.trim() }, `Details of ${v.name.trim()} saved.`)) },
+    ], 'Save', v => patch(u, { name: v.name.trim(), login: v.login.trim(), email: v.email.trim() }, `Details of ${v.name.trim()} saved.`)) },
     u.id === state.me.id ? null : '-',
     u.id === state.me.id ? null : { label: 'Delete account', danger: true, run: async () => {
       if (!(await confirmDialog(`Delete ${u.name} for good?`,

@@ -2889,6 +2889,17 @@ export function createApp(cfg = loadConfig()) {
         audit(c, 'admin', 'Manager role removed', who);
       }
     }
+    // The personal folder is named after the login, so it is renamed with it: same folder, same files. Computers show it
+    // as "My files" and know it by its id, so nothing changes there.
+    if (typeof b.login === 'string' && b.login.trim() !== u.login) {
+      const login = str(b.login, 40);
+      if (!login || !LOGIN_RE.test(login)) fail(400, 'Logins use Latin letters, digits, dots, dashes or underscores, for example a.serikova.');
+      unique(() => db.tx(() => {
+        db.run('UPDATE nodes SET name = ? WHERE parent_id = ? AND name = ? AND is_dir = 1 AND deleted_at IS NULL', login, db.ids.roots.personal, u.login);
+        db.run('UPDATE users SET login = ? WHERE id = ?', login, u.id);
+      }), 'This login is already taken.');
+      audit(c, 'admin', `login changed to ${login}`, who);
+    }
     if (typeof b.name === 'string') {
       const name = str(b.name, 80) || fail(400, 'Enter the full name.');
       if (name !== u.name) {
