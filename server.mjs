@@ -2764,9 +2764,10 @@ export function createApp(cfg = loadConfig()) {
       `SELECT u.id, u.login, u.name, u.email, u.is_admin, u.disabled, u.created_at, u.flat_home,
          EXISTS(SELECT 1 FROM members m WHERE m.user_id = u.id AND m.group_id = ${db.ids.managers}) AS manager,
          (SELECT MAX(seen_at) FROM sessions s WHERE s.user_id = u.id) AS last_seen,
-         (SELECT group_concat(g.name, ', ') FROM members m JOIN groups g ON g.id = m.group_id WHERE m.user_id = u.id) AS groups
+         (SELECT group_concat(g.name, ', ') FROM members m JOIN groups g ON g.id = m.group_id WHERE m.user_id = u.id) AS groups,
+         (SELECT json_group_array(json_object('os', d.os, 'app', d.app_version)) FROM devices d WHERE d.user_id = u.id AND d.revoked_at IS NULL) AS computers
        FROM users u WHERE u.deleted_at IS NULL ORDER BY u.disabled, u.is_admin DESC, u.name`,
-    ),
+    ).map(u => ({ ...u, computers: JSON.parse(u.computers) })),
   );
 
   add('POST', '/api/admin/users', 'admin', async c => {

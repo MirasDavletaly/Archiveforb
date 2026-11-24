@@ -931,6 +931,7 @@ try {
   await appIs('1.5.4');
   const topHeader = async () => { const r = await fetch(base + '/api/agent/cloud', { headers: { authorization: `Bearer ${devTok}` } }); await r.arrayBuffer(); return r.headers.get('x-top-holds-files'); };
   assert.equal(await topHeader(), '1', 'the Mac is told it may put things at the top (Finder offers it only then)');
+  assert.ok(ok(await admin.get('/api/admin/users')).find(u => u.id === owner.id).computers.some(d => d.app === '1.5.4'), 'IT sees which app version each of their computers has');
   const flatTop = ok(await agent('GET', '/api/agent/cloud', devTok));
   const names = flatTop.map(x => x.name);
   assert.ok(!names.includes('My files') && names.includes('chunked.bin') && names.includes('From Finder'), `My files' contents at the top, the folder itself gone: ${names.join(', ')}`);

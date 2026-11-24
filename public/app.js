@@ -1823,7 +1823,8 @@ async function viewPeople() {
       { v: u.groups || '', cls: 'muted' },
       { v: u.last_seen ? fmtDate(u.last_seen) : 'never', cls: 'mono' },
       [u.disabled ? h('span', { class: 'tag bad' }, 'blocked') : h('span', { class: 'muted' }, 'active'),
-        u.flat_home ? [h('br'), h('small', { class: 'muted' }, 'My files at the top on computers')] : null],
+        u.flat_home ? [h('br'), h('small', { class: 'muted' }, 'My files at the top on computers')] : null,
+        u.computers?.length ? [h('br'), h('small', { class: 'muted' }, u.computers.map(d => `${OS_NAME[d.os] || d.os} ${d.app || '(app not seen yet)'}`).join(', '))] : null],
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': `Actions for ${u.name}`, 'aria-haspopup': 'menu', onClick: e => openMenu(e.currentTarget, actions(u)) }, icon('dots', 'ico ico-dots'))])))), 'people');
 }
 
