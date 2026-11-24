@@ -346,7 +346,40 @@ function renderLogin(msg = '') {
       field('Password', h('input', { name: 'password', type: 'password', autocomplete: 'current-password', required: true })),
       h('p', { class: 'form-error', role: 'alert' }, msg),
       h('button', { type: 'submit', class: 'btn primary wide' }, 'Sign in')),
-    h('p', { class: 'gate-foot muted' }, 'Forgot your password? IT can reset it.'));
+    h('p', { class: 'gate-foot muted' }, h('button', { type: 'button', class: 'linkish', onClick: () => renderForgot() }, 'Forgot your password?')));
+}
+
+// Forgot password: a code to the account's email, then a new password. IT never sets passwords.
+function renderForgot(email = '') {
+  const back = h('button', { type: 'button', class: 'linkish', onClick: () => renderLogin() }, 'Back to sign in');
+  const step2 = email => gate(
+    h('h1', { class: 'gate-title' }, 'Check your email'),
+    h('p', { class: 'gate-sub' }, 'If ', h('strong', {}, email), ' is the email of an account, a 6-digit code is on its way. It works for 10 minutes. No email? Look in the spam folder.'),
+    form('stack', async v => {
+      if (v.password !== v.repeat) throw new Error('The two passwords do not match.');
+      const r = await api('POST', '/api/password/reset', { email, code: v.code, password: v.password });
+      gate(
+        h('h1', { class: 'gate-title' }, 'Your password is changed'),
+        h('p', { class: 'gate-sub' }, 'Sign in with the new password. Your login is ', h('strong', { class: 'mono' }, r.login), '; the email works too. Other devices were signed out.'),
+        h('button', { type: 'button', class: 'btn primary wide', onClick: () => renderLogin() }, 'Sign in'));
+    },
+      field('Code from the email', h('input', { name: 'code', class: 'mono', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: 7, required: true, autofocus: true })),
+      field('New password', h('input', { name: 'password', type: 'password', autocomplete: 'new-password', minlength: 12, required: true }), 'At least 12 characters.'),
+      field('Repeat the new password', h('input', { name: 'repeat', type: 'password', autocomplete: 'new-password', required: true })),
+      errorLine(),
+      h('button', { type: 'submit', class: 'btn primary wide' }, 'Save new password')),
+    h('p', { class: 'gate-foot muted' }, h('button', { type: 'button', class: 'linkish', onClick: () => renderForgot(email) }, 'Wrong email, or no code after a few minutes? Go back')));
+  gate(
+    h('h1', { class: 'gate-title' }, 'Forgot your password?'),
+    h('p', { class: 'gate-sub' }, 'Enter the email of your account. We send a code to it, and you choose a new password.'),
+    form('stack', async v => {
+      await api('POST', '/api/password/forgot', { email: v.email.trim() });
+      step2(v.email.trim().toLowerCase());
+    },
+      field('Email', h('input', { name: 'email', type: 'email', value: email, required: true, maxlength: 254, autocomplete: 'email', autocapitalize: 'none', spellcheck: 'false', autofocus: true })),
+      errorLine(),
+      h('button', { type: 'submit', class: 'btn primary wide' }, 'Send code')),
+    h('p', { class: 'gate-foot muted' }, 'No email in your account? Ask IT to add it. ', back));
 }
 
 function renderStage() {
@@ -1770,11 +1803,11 @@ async function viewPeople() {
   const create = form('row', async (v, f) => {
     const r = await api('POST', '/api/admin/users', { login: v.login.trim(), name: v.name.trim(), email: v.email.trim(), role: v.role });
     f.reset();
-    showPassword(v.login.trim(), r.password, true);
+    showPassword(v.login.trim(), r.password);
   },
     field('Full name', h('input', { name: 'name', required: true, maxlength: 80, autocomplete: 'off' })),
     field('Login', h('input', { name: 'login', required: true, maxlength: 40, autocapitalize: 'none', spellcheck: 'false', autocomplete: 'off', placeholder: 'a.serikova' })),
-    field('Email (optional)', h('input', { name: 'email', type: 'email', maxlength: 254, autocapitalize: 'none', spellcheck: 'false', autocomplete: 'off', placeholder: 'a.serikova@company.kz', title: 'They can sign in with it, and nobody can make a second account with it through an invite link.' })),
+    field('Email (optional)', h('input', { name: 'email', type: 'email', maxlength: 254, autocapitalize: 'none', spellcheck: 'false', autocomplete: 'off', placeholder: 'a.serikova@company.kz', title: 'They can sign in with it and get a code at it when they forget the password. Nobody can make a second account with it through an invite link.' })),
     field('Role', h('select', { name: 'role' }, h('option', { value: 'employee' }, 'Employee'), h('option', { value: 'manager' }, 'Manager'), h('option', { value: 'admin' }, 'IT admin'))),
     h('button', { type: 'submit', class: 'btn primary' }, 'Create account'),
     errorLine());
@@ -1805,15 +1838,12 @@ async function viewPeople() {
           if (await confirmDialog(`Put My files at the top on ${u.name}'s computers?`, 'In the Company Files folder on their computers there is no My files folder: what is in it sits at the top, next to the other folders, and what they put at the top goes into My files. Nothing is moved, and the website stays as it is. Computers with Company Files 1.5.4 or later change over by themselves within a minute; older ones keep My files as a folder until they are updated.', 'Put at the top'))
             await patch(u, { flat_home: true }, `On ${u.name}'s computers, My files is now at the top.`);
         } },
-    { label: u.email ? 'Change email' : 'Set email', run: () => formDialog(`Email of ${u.name}`,
+    // Everything but the password: people change that themselves ("Forgot your password?" on the sign-in page).
+    { label: 'Edit details', run: () => formDialog(`Details of ${u.name}`, [
+      field('Full name', h('input', { name: 'name', value: u.name, required: true, maxlength: 80, autocomplete: 'off' })),
       field('Email', h('input', { name: 'email', type: 'email', value: u.email || '', maxlength: 254, autocapitalize: 'none', spellcheck: 'false', autocomplete: 'off', placeholder: 'name@company.kz' }),
-        'They can sign in with it. One email can have only one account, so nobody can sign up again with it through an invite link. Leave empty to remove it.'),
-      'Save', v => patch(u, { email: v.email.trim() }, v.email.trim() ? `Email of ${u.name} saved.` : `Email of ${u.name} removed.`)) },
-    { label: 'Reset password', run: async () => {
-      if (!(await confirmDialog(`Reset the password of ${u.name}?`, 'A new temporary password is created and their current sessions end.', 'Reset password'))) return;
-      const r = await api('PATCH', `/api/admin/users/${u.id}`, { reset_password: true });
-      showPassword(u.login, r.password);
-    } },
+        'They sign in with it, and a code for a forgotten password goes to it. One email can have only one account. Leave empty to remove it.'),
+    ], 'Save', v => patch(u, { name: v.name.trim(), email: v.email.trim() }, `Details of ${v.name.trim()} saved.`)) },
     u.id === state.me.id ? null : '-',
     u.id === state.me.id ? null : { label: 'Delete account', danger: true, run: async () => {
       if (!(await confirmDialog(`Delete ${u.name} for good?`,
@@ -1851,8 +1881,8 @@ function showInvite(url) {
   d.addEventListener('close', () => route());
 }
 
-function showPassword(login, password, created = false) {
-  const d = dialog(created ? 'Account created' : 'Password reset', [
+function showPassword(login, password) {
+  const d = dialog('Account created', [
     h('p', {}, 'Temporary password for ', h('strong', {}, login), ':'),
     h('p', { class: 'callout secret' }, password),
     h('p', { class: 'muted' }, 'Hand it over in person or by phone. At first sign-in they choose their own password. This password is not shown again.'),

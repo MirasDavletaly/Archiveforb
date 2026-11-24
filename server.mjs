@@ -2666,6 +2666,33 @@ export function createApp(cfg = loadConfig()) {
     }
   }
 
+  // One code a minute per address, plus hourly ceilings per IP, per address and for the whole company mailbox.
+  function allowCode(c, key, email) {
+    const now = Date.now();
+    if (now - (pending.get(key)?.sent || 0) < 60e3) fail(429, 'A code was sent less than a minute ago. Check your inbox and the spam folder.');
+    if (pending.size > 10000) for (const [k, p] of pending) if (p.until < now) pending.delete(k);
+    if (now - mailWindow.since > 3600e3) mailWindow = { since: now, n: 0 };
+    if (joinIp.wait(ipKey(c.ip)) || joinMail.wait(email) || pending.size > 10000 || mailWindow.n >= MAILS_PER_HOUR) fail(429, 'Too many codes were requested. Try again in an hour.');
+    joinIp.fail(ipKey(c.ip));
+    joinMail.fail(email);
+    mailWindow.n++;
+    return now;
+  }
+
+  // A code from pending[key], checked the same way everywhere: 10 minutes, 5 tries, then dead.
+  function takeCode(key, code) {
+    const p = pending.get(key);
+    if (!p || p.until < Date.now()) {
+      pending.delete(key);
+      fail(400, 'This code has expired. Ask for a new one.');
+    }
+    if (!A.safeEqual(A.sha256(String(code ?? '').replace(/\s/g, '')), p.code)) {
+      if (++p.tries >= 5) pending.delete(key);
+      fail(400, p.tries >= 5 ? 'Too many wrong codes. Ask for a new one.' : 'Wrong code. Use the one from the latest email.');
+    }
+    return p;
+  }
+
   add('GET', '/api/join/:token', 'public', c => ({ appName: cfg.appName, domain: inviteFor(c.params.token).domain }));
 
   add('POST', '/api/join/:token/code', 'public', async c => {
@@ -2676,20 +2703,13 @@ export function createApp(cfg = loadConfig()) {
     if (!EMAIL_RE.test(email)) fail(400, 'Enter a valid email address.');
     if (inv.domain && !email.endsWith(`@${inv.domain}`)) fail(400, `Use your @${inv.domain} address.`);
     const key = `${inv.id}:${email}`;
-    const now = Date.now();
-    if (now - (pending.get(key)?.sent || 0) < 60e3) fail(429, 'A code was sent less than a minute ago. Check your inbox and the spam folder.');
-    if (pending.size > 10000) for (const [k, p] of pending) if (p.until < now) pending.delete(k);
-    if (now - mailWindow.since > 3600e3) mailWindow = { since: now, n: 0 };
-    if (joinIp.wait(ipKey(c.ip)) || joinMail.wait(email) || pending.size > 10000 || mailWindow.n >= MAILS_PER_HOUR) fail(429, 'Too many codes were requested. Try again in an hour.');
-    joinIp.fail(ipKey(c.ip));
-    joinMail.fail(email);
-    mailWindow.n++;
+    const now = allowCode(c, key, email);
     // Same answer, same timing rules, whether or not the address is registered, so nobody can look people up.
     const known = db.get('SELECT login FROM users WHERE email = ?', email);
     const code = A.otp();
     if (known)
       await mail(email, `${cfg.appName}: you already have an account`,
-        `Someone, probably you, tried to sign up with this email again.\n\nYou already have an account. Your login is ${known.login}; you can also sign in with this email.\nForgot your password? IT can reset it.\n\nIf it was not you, ignore this email.\n\n${cfg.publicUrl.origin}`);
+        `Someone, probably you, tried to sign up with this email again.\n\nYou already have an account. Your login is ${known.login}; you can also sign in with this email.\nForgot your password? Choose a new one with "Forgot your password?" on the sign-in page.\n\nIf it was not you, ignore this email.\n\n${cfg.publicUrl.origin}`);
     else
       await mail(email, `${code} is your ${cfg.appName} code`,
         `Your confirmation code: ${code}\n\nIt works for 10 minutes. Enter it on the sign-up page to create your account.\nIf you did not ask for it, ignore this email: without the code nothing happens.`);
@@ -2704,15 +2724,7 @@ export function createApp(cfg = loadConfig()) {
     // The name comes with the confirmation, so someone re-requesting a code cannot rename the person who confirms.
     const name = str(b.name, 80) || fail(400, 'Enter your full name.');
     const key = `${inv.id}:${email}`;
-    const p = pending.get(key);
-    if (!p || p.until < Date.now()) {
-      pending.delete(key);
-      fail(400, 'This code has expired. Ask for a new one.');
-    }
-    if (!A.safeEqual(A.sha256(String(b.code ?? '').replace(/\s/g, '')), p.code)) {
-      if (++p.tries >= 5) pending.delete(key);
-      fail(400, p.tries >= 5 ? 'Too many wrong codes. Ask for a new one.' : 'Wrong code. Use the one from the latest email.');
-    }
+    takeCode(key, b.code);
     const base = email.split('@')[0].replace(/[^a-z0-9._-]+/g, '.').replace(/^[._-]+|[._-]+$/g, '').slice(0, 36) || 'user';
     const problem = A.passwordProblem(b.password, base);
     if (problem) fail(400, problem);
@@ -2733,6 +2745,44 @@ export function createApp(cfg = loadConfig()) {
     pending.delete(key);
     db.audit('admin', made.uid, `ALERT account created through invite link #${inv.id}`, `${name} (${made.login}, ${email})`, c.ip);
     return { login: made.login };
+  });
+
+  // Forgot password (decided 2026-11-24): IT never sets passwords. A code goes to the account's email and the person
+  // picks a new password with it. Unknown addresses get no email but the same answer, so nobody can look people up.
+  add('POST', '/api/password/forgot', 'public', async c => {
+    if (!cfg.smtp) fail(503, 'Password reset by email is not set up yet. Ask IT.');
+    const b = await body(c);
+    const email = (str(b.email, 254) || '').toLowerCase();
+    if (!EMAIL_RE.test(email)) fail(400, 'Enter the email of your account.');
+    const key = `reset:${email}`;
+    const now = allowCode(c, key, email);
+    const u = db.get('SELECT id FROM users WHERE email = ? AND disabled = 0 AND deleted_at IS NULL', email);
+    const code = A.otp();
+    pending.set(key, { code: u ? A.sha256(code) : null, uid: u?.id, until: now + CODE_TTL, tries: 0, sent: now });
+    // Not awaited: waiting for the mail server only for real accounts would tell them apart. A failure is logged.
+    if (u)
+      mail(email, `${code} is your ${cfg.appName} code`,
+        `Your code for a new password: ${code}\n\nIt works for 10 minutes. Enter it on the sign-in page, under "Forgot your password?".\nIf you did not ask for it, ignore this email: without the code your password stays as it is.`).catch(() => {});
+    return { sent: true };
+  });
+
+  add('POST', '/api/password/reset', 'public', async c => {
+    const b = await body(c);
+    const email = (str(b.email, 254) || '').toLowerCase();
+    const key = `reset:${email}`;
+    const p = takeCode(key, b.code);
+    const u = db.get('SELECT * FROM users WHERE id = ? AND email = ? AND disabled = 0 AND deleted_at IS NULL', p.uid ?? 0, email);
+    if (!u) {
+      pending.delete(key);
+      fail(400, 'This code has expired. Ask for a new one.');
+    }
+    const problem = A.passwordProblem(b.password, u.login);
+    if (problem) fail(400, problem);
+    pending.delete(key); // a code works once
+    db.run('UPDATE users SET pass = ?, must_change = 0 WHERE id = ?', await A.hashPassword(b.password), u.id);
+    db.run('DELETE FROM sessions WHERE user_id = ?', u.id);
+    db.audit('auth', u.id, 'password changed with a code sent to the email', null, c.ip);
+    return { login: u.login };
   });
 
   // =====================================================================
@@ -2826,6 +2876,7 @@ export function createApp(cfg = loadConfig()) {
     if (!u) fail(404, 'Account not found.');
     const b = await body(c);
     const who = `${u.name} (${u.login})`;
+    if (b.reset_password !== undefined) fail(400, 'IT does not set passwords. People choose a new one with "Forgot your password?" on the sign-in page.');
     if (b.role !== undefined) {
       if (!['employee', 'manager'].includes(b.role)) fail(400, 'The role can be Employee or Manager.');
       if (u.is_admin) fail(400, 'IT admin accounts cannot open files, so their role stays IT admin. Create an employee account for this person instead.');
@@ -2838,13 +2889,12 @@ export function createApp(cfg = loadConfig()) {
         audit(c, 'admin', 'Manager role removed', who);
       }
     }
-    const out = { ok: true };
-    // Resetting someone with access to protected folders would let IT sign in as them: flag it for Managers.
-    const flag = acl.sensitive(u) ? 'ALERT ' : '';
     if (typeof b.name === 'string') {
       const name = str(b.name, 80) || fail(400, 'Enter the full name.');
-      db.run('UPDATE users SET name = ? WHERE id = ?', name, u.id);
-      audit(c, 'admin', `renamed account to ${name}`, who);
+      if (name !== u.name) {
+        db.run('UPDATE users SET name = ? WHERE id = ?', name, u.id);
+        audit(c, 'admin', `renamed account to ${name}`, who);
+      }
     }
     if (b.email !== undefined) {
       const email = emailArg(b.email);
@@ -2868,13 +2918,7 @@ export function createApp(cfg = loadConfig()) {
       if (b.disabled) db.run('DELETE FROM sessions WHERE user_id = ?', u.id);
       audit(c, 'admin', b.disabled ? 'blocked account (all devices signed out)' : 'unblocked account', who);
     }
-    if (b.reset_password === true) {
-      out.password = A.tempPassword();
-      db.run('UPDATE users SET pass = ?, must_change = 1 WHERE id = ?', await A.hashPassword(out.password), u.id);
-      db.run('DELETE FROM sessions WHERE user_id = ?', u.id);
-      audit(c, 'admin', `${flag}reset password`, who);
-    }
-    return out;
+    return { ok: true };
   });
 
   // Delete an account for good. The row stays as a tombstone (renamed login, no password, blocked) so that

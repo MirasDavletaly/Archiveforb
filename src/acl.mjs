@@ -154,19 +154,6 @@ export function makeAcl(db) {
     return out.sort((a, b) => AREAS.indexOf(a.area) - AREAS.indexOf(b.area) || key(a).localeCompare(key(b)));
   }
 
-  // Admins, Managers and anyone with access to a confidential folder: resetting their password is an ALERT.
-  function sensitive(user) {
-    if (user.is_admin) return true;
-    if (db.get('SELECT 1 FROM members WHERE user_id = ? AND group_id = ?', user.id, managers)) return true;
-    return !!db.get(
-      `WITH RECURSIVE up(id, parent_id, area) AS (
-         SELECT n.id, n.parent_id, n.area FROM nodes n JOIN acl a ON a.node_id = n.id WHERE a.user_id = ?
-         UNION SELECT p.id, p.parent_id, p.area FROM nodes p JOIN up ON p.id = up.parent_id)
-       SELECT 1 FROM up WHERE parent_id IS NULL AND area = 'confidential' LIMIT 1`,
-      user.id,
-    );
-  }
-
   // Everything the access dialog shows: grants on this folder and what reaches it from above.
   function accessView(r) {
     const rows = db.all(
@@ -190,5 +177,5 @@ export function makeAcl(db) {
     return { own: at(r.node.id).map(fmt), inherited, restricted: !r.node.inherit };
   }
 
-  return { ctxFor, NOBODY, levelOf, resolve, resolver, children, crumbs, spaces, sensitive, accessView };
+  return { ctxFor, NOBODY, levelOf, resolve, resolver, children, crumbs, spaces, accessView };
 }

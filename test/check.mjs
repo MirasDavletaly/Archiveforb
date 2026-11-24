@@ -1185,10 +1185,38 @@ try {
   assert.equal(ok(await new Client().post('/api/login', { login: 'sales@example.com', password: rassul.password })).stage, 'change', 'they can sign in with the email IT recorded');
   ok(await admin.patch(`/api/admin/users/${rassul.id}`, { email: '' }));
   assert.equal(app.db.get('SELECT email FROM users WHERE id = ?', rassul.id).email, null, 'IT can remove the email');
+  // IT edits everything but the password; a forgotten password is replaced with a code sent to the email.
+  ok(await admin.patch(`/api/admin/users/${rassul.id}`, { name: 'Rassul Temir', email: 'Rassul@Example.com' }));
+  assert.deepEqual({ ...app.db.get('SELECT name, email FROM users WHERE id = ?', rassul.id) }, { name: 'Rassul Temir', email: 'rassul@example.com' }, 'IT edits the name and the email');
+  assert.equal((await admin.patch(`/api/admin/users/${rassul.id}`, { reset_password: true })).status, 400, 'IT cannot set a password');
+  const R = new Client();
+  assert.equal(ok(await R.post('/api/login', { login: 'r.temiresh', password: rassul.password })).stage, 'change');
+  const sent = inbox.length;
+  ok(await new Client().post('/api/password/forgot', { email: 'nobody@example.com' }));
+  ok(await new Client().post('/api/password/forgot', { email: 'Rassul@Example.com' }));
+  for (let i = 0; i < 300 && inbox.length === sent; i++) await new Promise(r => setTimeout(r, 10)); // the email is sent after the answer
+  await new Promise(r => setTimeout(r, 100));
+  assert.equal(inbox.length, sent + 1, 'only the real account gets an email');
+  m = lastMail();
+  assert.equal(m.to, 'rassul@example.com');
+  const codeR = /password: (\d{6})/.exec(m.text)[1];
+  assert.equal((await new Client().post('/api/password/forgot', { email: 'rassul@example.com' })).status, 429, 'one code a minute');
+  assert.equal((await new Client().post('/api/password/reset', { email: 'nobody@example.com', code: codeR, password: strong() })).data.error, 'Wrong code. Use the one from the latest email.', 'an unknown address answers like a wrong code');
+  const resetAs = (code, password) => new Client().post('/api/password/reset', { email: 'rassul@example.com', code, password });
+  assert.equal((await resetAs(codeR, 'short')).status, 400, 'password rules apply');
+  assert.equal((await resetAs(codeR === '000000' ? '111111' : '000000', strong())).status, 400, 'a wrong code fails');
+  const pwR = strong();
+  assert.equal(ok(await resetAs(codeR, pwR)).login, 'r.temiresh');
+  assert.equal((await resetAs(codeR, strong())).status, 400, 'a code works once');
+  assert.ok(!ok(await R.get('/api/me')).user, 'their sessions end');
+  assert.equal((await new Client().post('/api/login', { login: 'r.temiresh', password: rassul.password })).status, 401, 'the old password is gone');
+  assert.equal(ok(await new Client().post('/api/login', { login: 'rassul@example.com', password: pwR })).stage, 'full', 'the new one works, with no forced change');
+  assert.ok(app.db.get(`SELECT 1 FROM audit WHERE action = 'password changed with a code sent to the email' AND actor = ?`, rassul.id));
   cfg.smtp = null;
   smtp.close();
   pass('Sign-up by invite link: email confirmed with a one-time code (10 min, 5 tries, 1 a minute), invited domain only, link limits, sign in with email');
   pass('One email, one account: IT can record an email; neither IT nor an invite link can make a second account with it');
+  pass('IT edits name and email but never a password; "Forgot your password?" sends a code (unknown addresses get none, same answers), sets the new password and ends sessions');
 
   // ---- regressions for the security audit of 2026-11-13 (each was a working exploit) ----
   {
