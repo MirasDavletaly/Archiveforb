@@ -17,7 +17,7 @@ export function loadConfig(env = process.env) {
     allowedHosts,
     minFree: gb(env.MIN_FREE_GB, 20),
     // Per person (or per external link) and per hour; beyond this, downloads pause and Managers see an alert.
-    dlFiles: Number(env.DOWNLOAD_LIMIT_FILES || 500),
+    dlFiles: Number(env.DOWNLOAD_LIMIT_FILES || 3000), // 500 until 2026-11-25: copying one folder of 914 CVs hit it
     dlBytes: gb(env.DOWNLOAD_LIMIT_GB, 20),
     port,
     host,
