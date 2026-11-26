@@ -3240,7 +3240,9 @@ export function createApp(cfg = loadConfig()) {
       if (status >= 500) console.error(new Date().toISOString(), req.method, url?.pathname ?? '?', Number.isInteger(e.status) ? `${status} ${e.message}` : e);
       if (res.headersSent) return res.destroy();
       if (!req.complete) res.setHeader('Connection', 'close');
-      json(res, status, { error: status < 500 ? e.message : 'Something went wrong on the server. Try again.', code: e.code });
+      // Our own refusals (fail) are written for people, 5xx too ("the editor is not reachable", "disk full"); only
+      // unexpected exceptions, whose text may show internals, get the generic line.
+      json(res, status, { error: status < 500 || e instanceof HttpError ? e.message : 'Something went wrong on the server. Try again.', code: e.code });
     }
   }
 

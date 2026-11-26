@@ -1122,7 +1122,9 @@ try {
     return { to: /^To: <(.+)>$/m.exec(head)[1], subject: Buffer.from(/=\?UTF-8\?B\?(.+)\?=/.exec(head)[1], 'base64').toString(), text: Buffer.from(text.replace(/\s/g, ''), 'base64').toString() };
   };
   const tok = ok(await admin.post('/api/admin/invites', { days: 7, max_uses: 3, domain: '@Example.com' })).url.split('/join/')[1];
-  assert.equal((await new Client().get(`/api/join/${tok}`)).status, 503, 'no sign-up while email is not set up');
+  const noMail = await new Client().get(`/api/join/${tok}`);
+  assert.equal(noMail.status, 503, 'no sign-up while email is not set up');
+  assert.match(noMail.data.error, /email is not set up/, 'a 5xx the server gives on purpose keeps its message for people');
   cfg.smtp = { host: '127.0.0.1', port: smtp.address().port, user: 'u', pass: 'p', from: 'Company Files <files@example.com>' };
   const joiner = new Client();
   assert.equal(ok(await joiner.get(`/api/join/${tok}`)).domain, 'example.com');
